@@ -1,0 +1,32 @@
+# Secrets
+.env
+.env.*
+
+# Claude local memory
+.claude/memory/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+__marimo__/
+
+# Data and outputs (large rasters, tiles, caches)
+data/
+*.tif
+*.tiff
+*.pmtiles
+*.laz
+*.las
+*.zarr/
+*.parquet
+
+# OS
+.DS_Store
+.claude/memory/
+CLAUDE.local.md
+layouts/
+exports/
+.vscode/
+.idea/

@@ -1,0 +1,30 @@
+[project]
+name = "aef-elevation"
+version = "0.1.0"
+description = "AlphaEarth embeddings draped over elevation: how river corridors and watersheds change over time."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "marimo",
+    "anywidget>=0.9",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "xarray",
+    "zarr>=3.1",
+    "obstore>=0.9.2",
+    "async-geotiff>=0.4",
+    "rasterio",
+    "pyproj",
+    "shapely>=2.0",
+    "pillow",
+    "pyarrow>=25.0.0",
+    "duckdb>=1.5.5",
+    "datafusion>=54.0.0",
+    "h3ronpy>=0.22.0",
+    "pmtiles",
+    "requests",
+]
+
+[tool.uv]
+package = false
