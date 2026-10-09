@@ -29,76 +29,36 @@
 
 """Earthwork on the fly: where the ground itself moved, from AlphaEarth, taught by 3DEP.
 
-Earthwork (E, the opening mode) is the chance that the ground was physically dug, filled or graded
-between the first and last year read (2023 and 2025 to start, close to the Sentinel-2 imagery's
-2022 to 2025; the years slider reaches back to 2017), not that its surface looked different. The model is earthwork_model.py's: a logistic regression on AlphaEarth's two years, taught
-where 3DEP lidar flew the same ground twice since 2017 (eight building sites and three mines), the
-difference of the two 1 m DEMs being the truth of where earth moved more than half a meter, and taught
-what is NOT digging by two wildfire burns, a coastal marsh and the water lying in both flights at every
-site (burn scars and water otherwise read as earthwork). Scored on sites
-it never saw, it finds site grading far better than plain AlphaEarth change where much else changed
-(Huntsville AP .55, plain change .09); at mines it does no better than plain change. It finds digs
-from about half a hectare well and most house-pad-sized ones not at all (10 m pixels). The DEM
-teaches; nothing on the map reads it.
+Earthwork is the chance that the ground was physically dug, filled or graded between the first and
+last year of the window (2023 and 2025 to start, close to the Sentinel-2 imagery's 2022 to 2025; the
+Years read slider reaches back to 2017), not that its surface looked different. The model is
+earthwork_model.py's: a logistic regression on AlphaEarth's two years, taught where 3DEP lidar flew
+the same ground twice since 2017 (eight building sites and three mines), the difference of the two
+1 m DEMs being the truth of where earth moved more than half a meter, and taught what is NOT digging
+by two wildfire burns, a coastal marsh and the water lying in both flights at every site (burn scars
+and water otherwise read as earthwork). Scored on sites it never saw, it finds site grading far
+better than plain AlphaEarth change where much else changed (Huntsville AP .55, plain change .09); at
+mines it does no better than plain change. It finds digs from about half a hectare well and most
+house-pad-sized ones not at all (10 m pixels). The DEM teaches; nothing on the map reads it.
 
-Each finer cell of the fold is scored, and each hexagon takes its highest-scoring finer cell (the
-frame's carry-the-peak), so one dig is not averaged away by the quiet ground around it. Viridis by
-the score, on all ground. P pairs the map with Earth Genome's Sentinel-2 on the left to see what each
-hot spot is (2022 to 2025 imagery). Earthwork is the only layer: on_the_fly.py's others (AEF Change,
-Overture, WSF) and its background land cover teachers (Impact Observatory, Overture) are left out, and
-AlphaEarth is read only over the window's years (Earthwork compares its two ends), never 2017 to 2025 whole.
+Only the window's first and last year of AlphaEarth are read, folded to H3 one level finer than the
+hexagons drawn. Every finer cell is scored and each hexagon takes its highest-scoring finer cell
+(carry the peak), so one dig is not averaged away by the quiet ground around it. Viridis by the
+score, on all ground. Hold space for Earth Genome's Sentinel-2, or P to pair it with the map, to see
+what each hot spot is. Click a hexagon for its score; the place comes from Overture's divisions.
 
-What follows is on_the_fly.py's own account (embeddings-on-the-fly), from which this is copied.
+Copied from embeddings-on-the-fly's on_the_fly.py (the map, the H3 folds, the Sentinel-2 imagery,
+search and place names) with everything else taken out: AEF Change, Overture and WSF layers, the land
+cover readers and teachers, the shared built-up models.
 
-Built-up ground on the fly, from AlphaEarth.
+Run: uv run marimo run earthwork.py --sandbox --watch (it fills the window; X or Esc gives the
+notebook back)
 
-A copy of aef-explorer's aef-s2-kinds-of-change.py (the map, the H3 folds,
-the per-view land cover reader, the card), with the shared models of
-embeddings-built-up run live on the view:
-
-- One layer at a time. WSF (W) on its own at every zoom, out to
-  continents: tiles of its own pyramid, colored by the year each pixel
-  first read as settlement (the atlas notebook's raw-index tiles, colored
-  in the browser). Or the hexagons in one of the modes below.
-- From zoom 9 the hexagons are AlphaEarth folded to H3, as in Kinds of
-  change.
-- From read res 11 (about zoom 13.2, where the 10 m mosaic is read) the
-  shared models run on every 10 m pixel of the view: the structure reading
-  (does a structure stand on or touch this pixel; height is implicit in
-  AlphaEarth, which GEDI lidar helped teach), and All built (water,
-  forest, grassland, desert, other built-up, road, building), the pooled
-  model stacked with a fit on the view's own live teachers (Overture roads
-  and footprints, WSF built-up away from both, steady Impact Observatory
-  natural classes). Each answer is kept in H3 res 13 cells (each takes the
-  pixel under its center), for the view the model last ran on only (memory);
-  every coarser hexagon is a group-by of them, so the hexagons agree at
-  every zoom. Only what is in view is read. Hexagons reach res
-  13 zoomed in, where structures start to show.
-- Color by: WSF (W), AEF Change (S), All built (A), Structure reading (R),
-  First year built (Y). The card gives the model's account of the
-  clicked hexagon.
-- Hold space for the Sentinel-2 yearly mosaic (Earth Genome, 2022 to 2025).
-- Color by: AEF Change (A), Overture (O: land use, roads, buildings, from
-  Overture's own PMTiles, in the hexagons' place, never over the imagery)
-  or WSF (W). The shared models are off for now (cfg "models"). P pairs the
-  map with Sentinel-2 on the left, the two moving together; paired, O cycles
-  the right map through AEF Change, Overture and WSF.
-
-Run: uv run marimo run on_the_fly.py --sandbox (it fills the window; X or
-Esc gives the notebook back)
-
-Attribution: "The AlphaEarth Foundations
-Satellite Embedding dataset is produced by Google and Google DeepMind"
-(CC BY 4.0). ESA WorldCover 10 m
-2021 v200 (c) ESA WorldCover project, contains modified Copernicus Sentinel
-data (2021) processed by the ESA WorldCover consortium (CC BY 4.0).
-Impact Observatory, Microsoft and Esri 10 m annual land use and land cover
-v02, via Microsoft Planetary Computer (CC BY 4.0).
-Sentinel-2 yearly mosaics by Earth Genome (CC BY 4.0). Photon (komoot) over
-OpenStreetMap data (ODbL). Place names from Overture Maps divisions:
-(c) OpenStreetMap contributors, Overture Maps Foundation (ODbL), with
-geoBoundaries, Esri Community Maps contributors and LINZ (CC BY 4.0).
-Basemap by Carto.
+Attribution: "The AlphaEarth Foundations Satellite Embedding dataset is produced by Google and Google
+DeepMind" (CC BY 4.0). 3DEP 1 m DEMs by the U.S. Geological Survey (teaching only). Sentinel-2
+yearly mosaics by Earth Genome (CC BY 4.0). Photon (komoot) over OpenStreetMap data (ODbL). Place
+names from Overture Maps divisions: (c) OpenStreetMap contributors, Overture Maps Foundation (ODbL),
+with geoBoundaries, Esri Community Maps contributors and LINZ (CC BY 4.0). Basemap by Carto.
 """
 
 import marimo
@@ -212,38 +172,13 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    # Built-up ground on the fly
+    # Earthwork
 
-    <small>A copy of aef-explorer's Kinds of change, with the shared models
-    of embeddings-built-up run live on the view.</small>
-
-    **What you are looking at.** One layer, Earthwork, from AlphaEarth, in
-    hexagons from zoom 9. The shared models below are off for now (cfg
-    `models`), and nothing runs them. From zoom 13.2, where
-    AlphaEarth is read at 10 m, the shared models run on every pixel of the
-    view in the background, and the model modes are drawn from their
-    answers; before that they are empty.
-
-    **The models.** The structure reading gives the chance a structure
-    stands on or touches each 10 m of ground: height is implicit in
-    AlphaEarth, which GEDI lidar and the Copernicus DEM helped teach. All
-    built reads seven classes (water, forest, grassland,
-    desert, other built-up, road, building): a pooled model taught at eight
-    sites, stacked with a fit on the view's own live teachers (Overture
-    roads and footprints, WSF built-up away from both, Impact Observatory's
-    steady natural classes). The view's fit is scored on teachers held out
-    by block; the card gives the score.
-
-    **One answer, every zoom.** Each 10 m answer is kept, for the view the
-    model last ran on, in the H3 res 13 cells whose center falls in the
-    pixel, and every
-    hexagon is a group-by of those: a res 9 hexagon's building share is the
-    share of its res 13 cells that read building. Hexagons reach res 13
-    zoomed in (about zoom 16), where structures start to show.
-
-    **Checking it.** Click a hexagon for the model's account: its classes,
-    structure reading, ground, built share by year, and the land cover. Hold space for the Sentinel-2
-    yearly imagery; scroll while holding to change its year.
+    **What you are looking at.** The chance the ground itself was dug,
+    filled or graded between the first and last year of the window, from
+    AlphaEarth alone, by a small model taught on 3DEP repeat lidar. Viridis:
+    dark unlikely, yellow likely. Hexagons from zoom 9; each shows its
+    highest-scoring patch.
 
     | Key | Does |
     | --- | --- |
@@ -253,14 +188,14 @@ def _(mo):
     | `[` `]` | the imagery year, back and forward |
     | `B` | the imagery's first year (2022) or its latest (2025), back and forth |
     | `;` `'` | the imagery darker, brighter |
-    | `-` `=` | the first year read, earlier, later |
-    | `_` `+` | the last year read, earlier, later |
+    | `-` `=` | the window's first year, earlier, later |
+    | `_` `+` | the window's last year, earlier, later |
     | `L` | place names on the map, off and on |
     | `/` | search a place, or paste an H3 string |
     | `X` | fill the window, and back |
     | `Esc` | clear the searched outline, then close the about box, the menu, the card, then leave the full window |
 
-    <small>Locally: `uv run marimo run on_the_fly.py --sandbox`</small>
+    <small>Locally: `uv run marimo run earthwork.py --sandbox --watch`</small>
     """)
     return
 
@@ -314,106 +249,12 @@ def _(os, tempfile):
     AEF_INDEX_URL = "https://data.source.coop/tge-labs/aef/v1/annual/aef_index.parquet"
     CACHE_DIR = os.path.join(tempfile.gettempdir(), "x-sql-marimo", "aef-lcms")
 
-    # ---- ESA WorldCover 2021 (v200), 10 m, straight from ESA's bucket -------
-    #. One COG per 3 x 3
-    # degree tile, EPSG:4326, 36000 px a side, six overviews, named by its
-    # south-west corner (N30E114). 2021 only: ESA says the 2020 and 2021 maps
-    # were made with different algorithms and should not be compared for
-    # change, so the land cover here describes the ground, it does not date
-    # anything.
-    WC_BUCKET, WC_REGION = "esa-worldcover", "eu-central-1"
-    WC_PREFIX = "v200/2021/map"
-    WC_S3_OPTS = {"timeout": "10s", "connect_timeout": "5s"}
-    WC_MAX_TILES = 16
-    WC_CLASSES = (
-        (10, "tree cover"), (20, "shrubland"), (30, "grassland"), (40, "cropland"),
-        (50, "built-up"), (60, "bare or sparse vegetation"), (70, "snow and ice"),
-        (80, "permanent water"), (90, "herbaceous wetland"), (95, "mangroves"), (100, "moss and lichen"),
-    )
-    # THE WHOLE HISTORY: from this read
-    # res on (about zoom 13.2, where the full-res mosaic is read and a view is
-    # small) every AlphaEarth year is read, not just the window. Each
-    # hexagon's change is then judged by what the ground did around it:
-    # one step that held (construction), came back (fields, water, seasons),
-    # changes this much most years (ground that turns over), kept moving
-    # every year (quarries, mines, sites still building out), or too recent
-    # to tell. At read res 10 the reads are slow already (Wuhan z12: 35 s
-    # for five years, 47 s for nine); at 11 the nine take about 17 s.
-    HIST_MIN_RES = 11
-    HIST_RESTLESS = 2.0
-
-    # ---- KINDS OF CHANGE, from AlphaEarth alone ------------------------------------
-    # The finer cells that moved most (the top KINDS_TOP of the view by how
-    # far their vector moved, first to last year read) are grouped by the
-    # DIRECTION they moved: each cell's change minus the change the whole
-    # view made (the embedding's own drift between years), normalized, then
-    # spherical k-means into KINDS_K kinds, the largest first. Ground that
-    # changed the same way lands in the same kind (fields turning over,
-    # water coming and going, land cleared for building).
-    # The groups are this view's: another view groups again.
-    KINDS_K = 6
-    # the grouping into kinds is off: no view draws it any more (it cost a k-means every frame)
-    KINDS_ON = False
-    KINDS_TOP = 0.25
-    # Kinds of change only zoomed in.
-    # Below this hexagon res the map is AEF Change and the land cover
-    # teachers are not read; from it, they are read after the hexagons are
-    # up and Kinds of change is drawn once they are in.
-    KINDS_MIN_RES = 10
-    KINDS_MIN_ZOOM = round(ZOOM0 + PER_RES * (KINDS_MIN_RES - BASE_RES), 1)
-    # ---- LAND COVER READ FROM ALPHAEARTH, every year. The teachers, per finer cell, each year:
-    #  - Impact Observatory's annual land cover (10 m, 2017 to 2023, Planetary
-    #    Computer) teaches its own year on all ground: the map and the
-    #    embedding are of the same year. 2024 and 2025 have no map; there the
-    #    nearest year's map teaches only ground that barely moved.
-    #  - Overture (OpenStreetMap) roads and rail, and land use (construction,
-    #    quarries, landfill -> "construction"; residential, industrial ->
-    #    "built-up"), describe today: they teach the last AlphaEarth year on all
-    #    ground, earlier years only where the ground barely moved. A cell is a
-    #    road when major roads (LC_ROAD_W, their width in m) cover LC_ROAD_FILL
-    #    of it: at zoom 10.5 only the big ones do, zoomed in the rest follow.
-    #  - ESA WorldCover 2021 stands in (quiet ground) when Impact Observatory
-    #    cannot be read.
-    # A cell teaches when LC_PURE of it is one class; "barely moved" is at or
-    # below the view's median change. The reader is a logistic regression per
-    # year on the 64 numbers (so the drift between years is learned with it),
-    # classes balanced to LC_CAP examples, each needing LC_MIN. Measured over
-    # Wuhan z10.5 against WSF (a check, not a teacher): WSF's new buildings
-    # 2022-25 read built-up, road or construction in 2025: 96%; the old
-    # nearest-average reading taught by WorldCover: 15%.
-    LC_PURE = 0.7
-    LC_MIN = 30
-    LC_CAP = 3000
-    LC_VOCAB = ("trees", "grass", "cropland", "built-up", "bare", "water", "wetland", "road", "construction")
-    # what counts as built, by LC_VOCAB index: built-up, and new roads and building sites too
-    BUILT_LC = tuple(LC_VOCAB.index(c) for c in ("built-up", "road", "construction"))
-    # ground already built in the first year read: the rest, read built in the last, is new
-    # and gets kinds of its own (see build_frame)
-    NEW_FROM = tuple(LC_VOCAB.index(c) for c in ("built-up", "road"))
-    # AEF CHANGE ON BUILT GROUND ONLY (as the screenshot notebook's Built only): a hexagon is
-    # drawn when its peak reads built (BUILT_LC) in the last year and at least BUILT_SHARE of its
-    # finer cells do
-    BUILT_SHARE = 0.5
-    IO_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
-    IO_TOKEN = "https://planetarycomputer.microsoft.com/api/sas/v1/token/io-lulc"
-    IO_COLLECTION = "io-lulc-annual-v02"
-    IO_YEARS = tuple(range(2017, 2024))
-    # Impact Observatory's classes in LC_VOCAB (clouds and snow teach nothing)
-    IO_CLASSES = {1: "water", 2: "trees", 4: "wetland", 5: "cropland", 7: "built-up", 8: "bare", 11: "grass"}
-    # Overture's own PMTiles (the divisions file below is one of them):
-    # transportation to zoom 14, base (land use) to zoom 13
-    OV_TILES = ("overturemaps-extras-us-west-2", "tiles/2026-08-19.0")
-    LC_ROAD_W = {"motorway": 30, "trunk": 25, "primary": 20, "secondary": 15, "tertiary": 10, "standard_gauge": 12}
-    LC_ROAD_FILL = 0.35
-
     # the place under a click: the Overture divisions PMTiles answer at once in
     # the browser (locality, county, region); then the whole ladder, locality
     # up to country with each country's own word for the level (local_type),
     # from Overture's divisions GeoParquet as Fused partitions it on Source
     # Cooperative (7 s cold, 1 to 3 s after)
     OV_DIV_PM = "https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/2026-08-19.0/divisions.pmtiles"
-    # the Overture release the shared models' teachers read (the models are off here)
-    OV_RELEASE = "2026-09-23.1"
     ADMIN_PQ = "s3://fused/overture/2026-05-20-0/theme=divisions"
 
     VIEW_W, VIEW_H = 700, 780
@@ -471,8 +312,6 @@ def _(os, tempfile):
         ALPHA_FILL,
         ALPHA_QUIET,
         BASE_RES,
-        BUILT_LC,
-        BUILT_SHARE,
         CACHE_DIR,
         CARRY_RES,
         CELL_BUDGET,
@@ -482,32 +321,11 @@ def _(os, tempfile):
         HOLD_MS,
         HOLD_SLOP_PX,
         HOME,
-        KINDS_K,
-        KINDS_ON,
-        KINDS_MIN_RES,
-        KINDS_MIN_ZOOM,
-        KINDS_TOP,
-        NEW_FROM,
-        IO_CLASSES,
-        IO_COLLECTION,
-        IO_STAC,
-        IO_TOKEN,
-        IO_YEARS,
         LABELS_SLOT,
-        LC_CAP,
-        LC_MIN,
-        LC_PURE,
-        LC_ROAD_FILL,
-        LC_ROAD_W,
-        LC_VOCAB,
-        OV_TILES,
         MAX_RES,
         MIN_RES,
         MOSAIC_MIN_RES,
-        HIST_MIN_RES,
-        HIST_RESTLESS,
         OV_DIV_PM,
-        OV_RELEASE,
         PAD,
         PER_RES,
         RASTER_TILE,
@@ -525,12 +343,6 @@ def _(os, tempfile):
         VIEW_H,
         VIEW_W,
         VIRIDIS,
-        WC_BUCKET,
-        WC_CLASSES,
-        WC_MAX_TILES,
-        WC_PREFIX,
-        WC_REGION,
-        WC_S3_OPTS,
         ZOOM0,
     )
 
@@ -622,7 +434,6 @@ def _(
     AEF_YEARS_ALL,
     CACHE_DIR,
     GeoTIFF,
-    MOSAIC_MIN_RES,
     ObjectStore,
     S3Store,
     S3_OPTS,
@@ -1362,670 +1173,6 @@ def _(
 
 
 @app.cell
-def _(ObjectStore, S3_OPTS, asyncio, math, np, source_coop, zarr):
-    # ---- WSF Tracker: a teacher of the shared models (the atlas notebook's reader) ----
-    # One GeoZarr on Source Cooperative, int8 per 10 m pixel: 0 never built-up,
-    # k = 1..20 the half-year it first read as built-up (1 = by 2016-07-01,
-    # 2 = July to December 2016, .., 20 = July to December 2025). Levels 1..12
-    # are a min pyramid: drawn, never folded. The grid is plate carree, so a
-    # lon/lat box is a window.
-    WSF_PREFIX = "mindearth/wsf/World_WSF_20160701-20260101.zarr"
-    WSF_RES, WSF_X0, WSF_Y0 = 8.983152841195216e-05, -180.00001488697754, 78.0100585990529
-    WSF_LEVELS = 13
-    WSF_NIDX = 20
-    # opened on first use: only the shared models (off by default) read WSF, as a teacher; nothing draws it
-    _arr = {}
-    _win = {}
-    _sem = asyncio.Semaphore(6)
-
-    def _level(k):
-        if not _arr:
-            _root = zarr.open_group(ObjectStore(source_coop(WSF_PREFIX, **S3_OPTS), read_only=True), mode="r")
-            _arr.update({j: _root[str(j)]["wsf_tracker"] for j in range(WSF_LEVELS)})
-        return _arr[k]
-
-    def wsf_label(k):
-        """A half-year index in words."""
-        k = int(k)
-        if k <= 0:
-            return "never"
-        if k == 1:
-            return "by mid 2016"
-        return f"{2016 + (k - 1) // 2} {'Jan to Jun' if k % 2 else 'Jul to Dec'}"
-
-    def _px(k):
-        return WSF_RES * (2 ** k)
-
-    def _window_ix(k, box):
-        W_, S_, E_, N_ = box
-        px = _px(k)
-        H, W = _level(k).shape
-        c0, c1 = max(0, int(math.floor((W_ - WSF_X0) / px))), min(W, int(math.ceil((E_ - WSF_X0) / px)))
-        r0, r1 = max(0, int(math.floor((WSF_Y0 - N_) / px))), min(H, int(math.ceil((WSF_Y0 - S_) / px)))
-        return c0, c1, r0, r1, px
-
-    async def wsf_window(k, box, stride=1):
-        """The level-k pixels under the box: (int8 (h, w), lon of the columns,
-        lat of the rows) or None. zarr's sync read runs in a thread."""
-        c0, c1, r0, r1, px = _window_ix(k, box)
-        if c1 <= c0 or r1 <= r0:
-            return None
-        key = (k, stride, r0, r1, c0, c1)
-        a = _win.get(key)
-        if a is None:
-            loop = asyncio.get_running_loop()
-            async with _sem:
-                a = await loop.run_in_executor(None, lambda: np.asarray(_arr[k][r0:r1:stride, c0:c1:stride]))
-            _win[key] = a
-            if len(_win) > 64:
-                _win.pop(next(iter(_win)))
-        lon = WSF_X0 + (c0 + stride * np.arange(a.shape[1]) + 0.5) * px
-        lat = WSF_Y0 - (r0 + stride * np.arange(a.shape[0]) + 0.5) * px
-        return a, lon, lat
-
-    async def wsf_on_grid(west, north, res, h, w):
-        """WSF level 0 at every pixel center of a lon/lat grid (the AEF
-        mosaic's), nearest: the two grids are both about 10 m. Also the native
-        window and its origin, for joins at WSF's own resolution."""
-        lon = west + (np.arange(w) + 0.5) * res
-        lat = north - (np.arange(h) + 0.5) * res
-        got = await wsf_window(0, (lon[0] - res, lat[-1] - res, lon[-1] + res, lat[0] + res))
-        if got is None:
-            return np.zeros((h, w), np.uint8)
-        a, wl, wt = got
-        cols = np.clip(np.floor((lon - (wl[0] - WSF_RES / 2)) / WSF_RES).astype(np.int64), 0, a.shape[1] - 1)
-        rows = np.clip(np.floor(((wt[0] + WSF_RES / 2) - lat) / WSF_RES).astype(np.int64), 0, a.shape[0] - 1)
-        return a[np.ix_(rows, cols)].astype(np.uint8)
-
-    return WSF_NIDX, wsf_label, wsf_on_grid
-
-
-@app.cell
-def _(AEF_NODATA, OV_RELEASE, aef_window, asyncio, change_resolution, json, math, np, os, pa, time, urllib, wsf_on_grid):
-    # ---- THE SHARED MODELS, per 10 m pixel, kept in H3 res 13 for the session ----
-    # Taught on the downloaded sites of embeddings-built-up (training/), run here
-    # on the view. On every 10 m pixel:
-    #  - the structure reading: a logistic on the pixel's 64 AEF values and their
-    #    3 x 3 mean (taught at nine sites; one whole site left out it scored AUC
-    #    0.946 on average) gives the chance a structure stands on or touches it,
-    #  - the bare ground codes from it: standing (50% or more), and flat (under
-    #    20%) in a city (10% or more of the 61 x 61 px around stands), at an edge,
-    #    or bare (under 2% stands),
-    #  - All built, seven classes: the pooled logistic (eight sites) on the same
-    #    128 values and three from the reading, stacked with a logistic fit on the
-    #    view's own live teachers (training/height_clean.py's teachers built live:
-    #    Overture roads buffered by class and footprints, WSF built-up away from
-    #    both, Impact Observatory's natural classes steady 2021 to 2023, open land
-    #    use as free ground). The teachers describe now, so they teach 2025.
-    # Per pixel then fold: on eight sites (experiments/hex_vs_pixel.py) it named
-    # the classes best at res 9 to 12. Each answer goes to the H3 res 13 cells
-    # whose center falls in the pixel; a hexagon at any res is a group-by of
-    # those, so the zooms agree. The store holds only the view the model last
-    # ran on (memory), for the session only.
-    import shapely as _shp
-    from h3ronpy.vector import cells_to_coordinates as _c2xy, wkb_to_cells as _wkb2cells
-    from scipy.ndimage import binary_dilation as _dilate, uniform_filter as _uf
-
-    OTF_CLASSES = ["water", "forest", "grassland", "desert", "other built-up", "road", "building"]
-    OTF_BUILT = (4, 5, 6)
-    OTF_GROUND = {1: "standing", 2: "flat in a city", 3: "flat at an edge", 4: "bare", 5: "unsure"}
-    OTF_TEACH_YEAR = 2025
-    _STAND, _FLAT, _CITY, _BARE, _WINPX, _PAD = 0.5, 0.2, 0.10, 0.02, 61, 30
-    _N_LIVE, _MIN_CLASS, _BLOCK, _ROWS = 1000, 100, 32, 256
-    _ROAD_HALF_M = {"motorway": 15, "trunk": 12, "primary": 10, "secondary": 8, "tertiary": 6,
-                    "unclassified": 5, "residential": 5, "living_street": 4, "service": 3, "unknown": 4}
-    _OPEN_SUB = ("park", "cemetery", "golf", "protected")
-    _OPEN_CLS = ("pitch", "track", "playground", "recreation_ground", "dog_park", "village_green", "grass",
-                 "meadow", "garden", "allotments", "flowerbed")
-    _IO_TO = {1: 0, 2: 1, 4: 2, 5: 2, 11: 2, 8: 3}
-    _IO_NAMES = {1: "water", 2: "trees", 4: "flooded vegetation", 5: "crops", 7: "built area", 8: "bare ground",
-                 9: "snow or ice", 10: "clouds", 11: "rangeland"}
-    _WC_URL = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_{}_Map.tif"
-    _WC_TO_IO = {10: 2, 20: 11, 30: 11, 40: 5, 50: 7, 60: 8, 70: 9, 80: 1, 90: 4, 95: 4, 100: 11}
-    # Overture's tiles: the pinned release while its tiles answer, else the latest in its STAC
-    IO_S3 = "https://s3.us-west-2.amazonaws.com/io-10m-annual-lulc"
-    _OV_TILES, _OV_STAC, _OV_PIN = "https://tiles.overturemaps.org", "https://stac.overturemaps.org/catalog.json", OV_RELEASE
-
-    _here = None
-    try:
-        _here = os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        pass
-
-    def _load_model(name):
-        p = os.path.join(_here or ".", "models", name)
-        if os.path.exists(p):
-            with open(p) as f:
-                return json.load(f)
-        with urllib.request.urlopen("https://raw.githubusercontent.com/kentstephen/embeddings-on-the-fly/main/models/" + name, timeout=30) as r:
-            return json.loads(r.read())
-
-    _S = _load_model("structure_reading_logreg128.json")
-    _M = _load_model("all_built_pooled_logit_read.json")
-    _S_mu, _S_sd = np.asarray(_S["standardize"]["mean"], np.float32), np.asarray(_S["standardize"]["scale"], np.float32)
-    _S_w = np.asarray(_S["coef"], np.float32)
-    _M_mu, _M_sd = np.asarray(_M["standardize"]["mean"], np.float32), np.asarray(_M["standardize"]["scale"], np.float32)
-    _M_w, _M_b = np.asarray(_M["coef"], np.float32), np.asarray(_M["intercept"], np.float32)
-
-    def _deq(q):
-        v = q.astype(np.float32)
-        v = np.sign(v) * (v / 127.5) ** 2
-        v[q == AEF_NODATA] = 0
-        return v
-
-    def _feats_rows(q, r0, r1):
-        """Rows r0..r1 of the grid: (rows * w, 128), the 64 values and their
-        3 x 3 mean (nodata as 0, as in training), and which have AEF."""
-        lo, hi = max(r0 - 1, 0), min(r1 + 1, q.shape[1])
-        v = _deq(q[:, lo:hi])
-        m = _uf(v, size=(1, 3, 3), mode="nearest")
-        sl = slice(r0 - lo, r0 - lo + (r1 - r0))
-        X = np.concatenate([v[:, sl].reshape(64, -1).T, m[:, sl].reshape(64, -1).T], 1)
-        return X, (q[0, r0:r1] != AEF_NODATA).ravel()
-
-    def _pooled(XR):
-        z = (XR - _M_mu) / _M_sd
-        L = z @ _M_w.T + _M_b
-        L -= L.max(1, keepdims=True)
-        e = np.exp(L)
-        P = np.zeros((len(XR), 7), np.float32)
-        P[:, _M["model_classes"]] = e / e.sum(1, keepdims=True)
-        return P
-
-    def _logit(X, y):
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.pipeline import make_pipeline
-        from sklearn.preprocessing import StandardScaler
-        return make_pipeline(StandardScaler(), LogisticRegression(C=1.0, max_iter=1000)).fit(X, y)
-
-    def _proba(m, X):
-        P = np.zeros((len(X), 7), np.float32)
-        P[:, m.classes_] = m.predict_proba(X)
-        return P
-
-    # ---- the live teachers' reads ----------------------------------------------
-    _OV = {}
-
-    def _ov_release():
-        import requests
-        if "rel" not in _OV:
-            rel = _OV_PIN
-            try:
-                r = requests.get(f"{_OV_TILES}/{rel}/buildings.pmtiles", headers={"Range": "bytes=0-126"}, timeout=15)
-                r.raise_for_status()
-            except Exception:
-                rel = requests.get(_OV_STAC, timeout=20).json()["latest"]
-            _OV["rel"] = rel
-        return _OV["rel"]
-
-    def _ov_features(theme, layers, box):
-        """Every feature of the layers in the theme's deepest tiles over the box:
-        (layer, properties, shapely geometry in lon/lat); a feature crossing tiles
-        comes once per tile, clipped."""
-        import gzip
-        import requests
-        from concurrent.futures import ThreadPoolExecutor
-        import mapbox_vector_tile
-        from pmtiles.reader import Reader
-        key = "pm_" + theme
-        if key not in _OV:
-            url, sess = f"{_OV_TILES}/{_ov_release()}/{theme}.pmtiles", requests.Session()
-
-            def get(o, n):
-                r = sess.get(url, headers={"Range": f"bytes={o}-{o + n - 1}"}, timeout=30)
-                r.raise_for_status()
-                return r.content
-
-            rd = Reader(get)
-            _OV[key] = (rd, rd.header()["max_zoom"])
-        rd, z = _OV[key]
-        n = 2 ** z
-        tx = lambda lon: int((lon + 180) / 360 * n)  # noqa: E731
-        ty = lambda lat: int((1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n)  # noqa: E731
-        W_, S_, E_, N_ = box
-        tiles = [(x, y) for x in range(tx(W_), tx(E_) + 1) for y in range(ty(N_), ty(S_) + 1)]
-
-        def one(xy):
-            x, y = xy
-            d = rd.get(z, x, y)
-            if not d:
-                return []
-            if d[:2] == b"\x1f\x8b":
-                d = gzip.decompress(d)
-            dec = mapbox_vector_tile.decode(d, default_options={"y_coord_down": True})
-            out = []
-            for ln in layers:
-                lay = dec.get(ln)
-                if not lay:
-                    continue
-                ext = lay.get("extent", 4096)
-
-                def ll(a, x=x, y=y, ext=ext):
-                    lon = (x + a[:, 0] / ext) / n * 360 - 180
-                    lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + a[:, 1] / ext) / n))))
-                    return np.column_stack([lon, lat])
-
-                for f in lay["features"]:
-                    try:
-                        out.append((ln, f["properties"], _shp.transform(_shp.geometry.shape(f["geometry"]), ll)))
-                    except Exception:
-                        continue
-            return out
-
-        with ThreadPoolExecutor(16) as ex:
-            return [f for part in ex.map(one, tiles) for f in part]
-
-    def _overture(box):
-        from concurrent.futures import ThreadPoolExecutor
-        bx = _shp.box(*box)
-        with ThreadPoolExecutor(3) as ex:
-            fb = ex.submit(_ov_features, "buildings", ["building"], box)
-            ft = ex.submit(_ov_features, "transportation", ["segment"], box)
-            fs = ex.submit(_ov_features, "base", ["land_use", "water"], box)
-            fb, ft, fs = fb.result(), ft.result(), fs.result()
-        pieces = {}
-        for _, pr, g in fb:
-            if g.geom_type in ("Polygon", "MultiPolygon") and g.intersects(bx):
-                pieces.setdefault(pr.get("id"), []).append(g)
-        bld = [_shp.union_all(v) if len(v) > 1 else v[0] for v in pieces.values()]
-        roads = [(pr.get("class"), g) for _, pr, g in ft if pr.get("subtype") == "road" and pr.get("class") in _ROAD_HALF_M
-                 and g.geom_type.endswith("LineString")]
-        opn = [g for ln, pr, g in fs if ln == "land_use" and g.geom_type.endswith("Polygon")
-               and (pr.get("subtype") in _OPEN_SUB or pr.get("class") in _OPEN_CLS) and "water" not in str(pr.get("class"))]
-        return bld, roads, opn, _ov_release()
-
-    def _warp(href, tr, h, w):
-        import rasterio
-        from rasterio.enums import Resampling
-        from rasterio.vrt import WarpedVRT
-        with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_HTTP_MAX_RETRY="4", GDAL_HTTP_RETRY_DELAY="2"):
-            with rasterio.open(href) as src, WarpedVRT(src, crs="EPSG:4326", transform=tr, width=w, height=h,
-                                                       resampling=Resampling.nearest, src_nodata=0, nodata=0) as vrt:
-                return vrt.read(1)
-
-    def _landcover(box, tr, h, w):
-        """IO class per pixel (2023), steady 2021 to 2023, and the source; ESA
-        WorldCover 2021 (one year, no steadiness test) when Impact Observatory
-        cannot be read. Impact Observatory from its AWS open data bucket
-        (s3://io-10m-annual-lulc, the same maps as Planetary Computer's
-        io-lulc-annual-v02, pixel for pixel): one COG per UTM zone and latitude
-        band a year, so no search and no token, every file warped side by side."""
-        try:
-            from concurrent.futures import ThreadPoolExecutor
-            W_, S_, E_, N_ = box
-            bands = "CDEFGHJKLMNPQRSTUVWX"  # 8 degrees each from 80 S (X, the last, is 12)
-            band = lambda la: bands[min(19, max(0, int((la + 80) // 8)))]  # noqa: E731
-            zones = range(int((W_ + 180) // 6) + 1, int((E_ + 180) // 6) + 2)
-            lets = sorted({band(S_), band(N_)} | {band(la) for la in np.arange(S_, N_, 8.0)})
-            todo = [(yr, f"{IO_S3}/{z:02d}{b}_{yr}.tif") for yr in (2021, 2022, 2023) for z in zones for b in lets]
-
-            def one(it):
-                # a zone and band with no file (open sea) reads as nothing
-                try:
-                    return _warp(f"/vsicurl/{it[1]}", tr, h, w)
-                except Exception:
-                    return np.zeros((h, w), np.uint8)
-
-            with ThreadPoolExecutor(max(1, min(8, len(todo)))) as ex:
-                warped = list(ex.map(one, todo))
-            lc = {}
-            for yr in (2021, 2022, 2023):
-                m = np.zeros((h, w), np.uint8)
-                for (y_, _), a in zip(todo, warped):
-                    if y_ == yr:
-                        m = np.where(m == 0, a, m)
-                lc[yr] = m
-            if not lc[2023].any():
-                raise RuntimeError("no IO 2023 here")
-            return lc[2023], (lc[2021] == lc[2023]) & (lc[2022] == lc[2023]), "Impact Observatory 2023, steady 2021 to 2023"
-        except Exception as ex:
-            why = f"{type(ex).__name__}"
-        W_, S_, E_, N_ = box
-        m = np.zeros((h, w), np.uint8)
-        for la in range(int(math.floor(S_ / 3) * 3), int(math.floor(N_ / 3) * 3) + 1, 3):
-            for lo in range(int(math.floor(W_ / 3) * 3), int(math.floor(E_ / 3) * 3) + 1, 3):
-                nm = f"{'N' if la >= 0 else 'S'}{abs(la):02d}{'E' if lo >= 0 else 'W'}{abs(lo):03d}"
-                try:
-                    m = np.where(m == 0, _warp(f"/vsicurl/{_WC_URL.format(nm)}", tr, h, w), m)
-                except Exception:
-                    continue
-        io_ = np.zeros_like(m)
-        for wc, code in _WC_TO_IO.items():
-            io_[m == wc] = code
-        return io_, np.ones(m.shape, bool), f"ESA WorldCover 2021 (Impact Observatory: {why})"
-
-    def _burn(geoms, tr, h, w):
-        from rasterio.features import rasterize
-        geoms = [g for g in geoms if g is not None and not g.is_empty]
-        if not geoms:
-            return np.zeros((h, w), bool)
-        return rasterize(((g, 1) for g in geoms), out_shape=(h, w), transform=tr, fill=0, dtype=np.uint8).astype(bool)
-
-    def _teachers(bld, roads, opn, wsf, lc, steady, tr, h, w, lat):
-        """training/height_clean.py's labels: 0..6 per pixel, -1 none."""
-        kx, ky = 111_320.0 * math.cos(math.radians(lat)), 110_574.0
-        rp = []
-        if roads:
-            cls = np.array([c for c, _ in roads], dtype=object)
-            rg = np.array([g for _, g in roads], dtype=object)
-            rp = _shp.transform(_shp.buffer(_shp.transform(rg, lambda a: a * [kx, ky]), np.array([_ROAD_HALF_M[c] for c in cls], float),
-                                             cap_style="flat"), lambda a: a / [kx, ky])
-        road, bldg, open_ = _burn(rp, tr, h, w), _burn(bld, tr, h, w), _burn(opn, tr, h, w)
-        near = _dilate(road | bldg, iterations=1)
-        built = wsf > 0
-        k = np.full((h, w), -1, np.int8)
-        k[~built & ~near] = 0
-        k[built & ~near] = 3
-        k[open_ & ~near & (lc != 1)] = 4
-        lab = np.full((h, w), -1, np.int8)
-        lab[k == 3] = 4
-        lab[road] = 5
-        lab[bldg] = 6
-        free = (k == 0) | (k == 4)
-        for code, c in _IO_TO.items():
-            lab[free & steady & (lc == code)] = c
-        return lab, bldg
-
-    # ---- the session store: one row per res 13 cell ---------------------------
-    STORE = {"years": {}, "fixed": None, "boxes": [], "par": {}, "info": [], "ver": 0}
-
-    def otf_covered(view, years):
-        """Whether the store already holds these years over this box."""
-        ys = set(years) | {OTF_TEACH_YEAR}
-        for b, yy in STORE["boxes"]:
-            if ys <= yy and b[0] <= view[0] and b[1] <= view[1] and b[2] >= view[2] and b[3] >= view[3]:
-                return True
-        return False
-
-    async def otf_run(view, years, say=lambda m: None):
-        """The models over the box (lon/lat W, S, E, N) for the years, into the store."""
-        t0 = time.time()
-        years = sorted(set(int(y) for y in years) | {OTF_TEACH_YEAR})
-        r_ = 8.983111749910169e-05
-        pad = _PAD * r_
-        box = (view[0] - pad, view[1] - pad, view[2] + pad, view[3] + pad)
-        # every AlphaEarth year read at once, from the start (the teaching year first in line), so the
-        # other years arrive while the teachers are read and the fit runs; any still reading when the
-        # run ends or is cancelled are cancelled with it
-        _aef = {y: asyncio.ensure_future(aef_window(box, y)) for y in [OTF_TEACH_YEAR] + [y for y in years if y != OTF_TEACH_YEAR]}
-        asyncio.current_task().add_done_callback(lambda _t: [f.cancel() for f in _aef.values() if not f.done()])
-        got = await _aef[OTF_TEACH_YEAR]
-        if got is None:
-            return None
-        q_last, west, north, res = got
-        h, w = q_last.shape[1:]
-        from rasterio.transform import Affine
-        tr = Affine(res, 0, west, 0, -res, north)
-        lat = north - h * res / 2
-        say("the model: reading WSF, Overture and Impact Observatory for the teachers…")
-        wsf, (bld, roads, opn, rel), (lc, steady, lc_src) = await asyncio.gather(
-            wsf_on_grid(west, north, res, h, w),
-            asyncio.to_thread(_overture, box),
-            asyncio.to_thread(_landcover, box, tr, h, w))
-        lab, bldg = await asyncio.to_thread(_teachers, bld, roads, opn, wsf, lc, steady, tr, h, w, lat)
-        t_read = time.time() - t0
-
-        def reading(q):
-            p = np.full(h * w, np.nan, np.float32)
-            for r0 in range(0, h, _ROWS):
-                X, ok = _feats_rows(q, r0, min(h, r0 + _ROWS))
-                z = (X - _S_mu) / _S_sd
-                pr = 1 / (1 + np.exp(-(z @ _S_w + _S["intercept"])))
-                p[r0 * w:r0 * w + len(pr)] = np.where(ok, pr, np.nan)
-            p = p.reshape(h, w)
-            ok = np.isfinite(p)
-            pf = np.where(ok, p, 0).astype(np.float32)
-            R = np.stack([pf, _uf(pf, size=3, mode="nearest"), _uf((ok & (pf >= _STAND)).astype(np.float32), size=_WINPX, mode="constant")], -1)
-            code = np.full((h, w), 5, np.uint8)
-            flat = ok & (pf < _FLAT)
-            dens = R[..., 2]
-            code[ok & (pf >= _STAND)] = 1
-            code[flat & (dens >= _CITY)] = 2
-            code[flat & (dens < _CITY) & (dens >= _BARE)] = 3
-            code[flat & (dens < _BARE)] = 4
-            code[~ok] = 255
-            return p, R.reshape(-1, 3), code
-
-        # the live fits, on the teaching year (scored on teachers held out by block)
-        def fits():
-            p, R, code = reading(q_last)
-            y = lab.ravel()
-            inner = np.zeros((h, w), bool)
-            inner[_PAD:-_PAD, _PAD:-_PAD] = True
-            y = np.where(inner.ravel() & np.isfinite(p.ravel()), y, -1)
-            counts = np.array([(y == c).sum() for c in range(7)])
-            present = [c for c in range(7) if counts[c] >= _MIN_CLASS]
-            prior = np.zeros(7, np.float32)
-            if present:
-                prior[present] = counts[present] / counts[present].sum()
-            rr, cc = np.divmod(np.arange(h * w), w)
-            blk = (rr // _BLOCK) * (w // _BLOCK + 1) + cc // _BLOCK
-            ids = np.unique(blk)
-            fold = (np.random.default_rng(0).permutation(len(ids)) % 5)[np.searchsorted(ids, blk)]
-            rng = np.random.default_rng(0)
-
-            def draw(mask, y=y, present=present):
-                parts = [rng.choice(np.flatnonzero(mask & (y == c)), min(_N_LIVE, int((mask & (y == c)).sum())), replace=False)
-                         for c in present if (mask & (y == c)).any()]
-                return np.concatenate(parts) if parts else np.zeros(0, np.int64)
-
-            def rows_of(i):
-                r, c = np.divmod(i, w)
-                v = _deq(q_last[:, r, c]).T
-                m = np.zeros_like(v)
-                for dr in (-1, 0, 1):
-                    for dc in (-1, 0, 1):
-                        m += _deq(q_last[:, np.clip(r + dr, 0, h - 1), np.clip(c + dc, 0, w - 1)]).T
-                X = np.hstack([v, m / 9, R[i]])
-                Ps = _pooled(X)
-                return X, Ps, np.log(np.clip(Ps, 1e-4, 1))
-
-            allp = draw(np.ones(h * w, bool))
-            if len(present) < 2 or len(allp) < 50:
-                return None, prior, present, None, counts, (p, R, code)
-            Xa, Pa, La = rows_of(allp)
-            # what the held-out scores need: they are worked out after the map has its answer
-            held = (Xa, Pa, La, fold[allp], y[allp])
-            return _logit(np.hstack([Xa, La]), y[allp]), prior, present, held, counts, (p, R, code)
-
-        def score(held, prior):
-            """The held-out scores, by block (5 folds): the shared model alone, and stacked."""
-            from sklearn.metrics import balanced_accuracy_score
-            Xa, Pa, La, fa, ya = held
-            scores, yt, out = {}, [], {"shared": [], "stacked": []}
-            for k in range(5):
-                tri, tei = np.flatnonzero(fa != k), np.flatnonzero(fa == k)
-                if len(tei) < 20 or len(set(ya[tri])) < 2:
-                    continue
-                m = _logit(np.hstack([Xa[tri], La[tri]]), ya[tri])
-                yt.append(ya[tei])
-                out["shared"].append((Pa[tei] * prior).argmax(1))
-                out["stacked"].append((_proba(m, np.hstack([Xa[tei], La[tei]])) * prior).argmax(1))
-            if yt:
-                yt = np.concatenate(yt)
-                for v in out:
-                    pv = np.concatenate(out[v])
-                    scores[v] = {"balanced accuracy": float(balanced_accuracy_score(yt, pv)),
-                                 "built vs natural": float(balanced_accuracy_score(np.isin(yt, OTF_BUILT), np.isin(pv, OTF_BUILT)))}
-            return scores
-
-        say("the model: fitting on the live teachers…")
-        stack, prior, present, held, counts, last_reading = await asyncio.to_thread(fits)
-        t_fit = time.time() - t0 - t_read
-
-        # res 13 cells of the view: each takes the pixel under its center
-        cl = pa.array(_wkb2cells(pa.array([_shp.to_wkb(_shp.box(*view))], pa.binary()), 13, flatten=True))
-        cells13 = np.sort(np.asarray(cl).astype(np.uint64))
-        xy = _c2xy(pa.array(cells13))
-        rr13 = np.floor((north - np.asarray(pa.array(xy.column("lat")))) / res).astype(np.int64)
-        cc13 = np.floor((np.asarray(pa.array(xy.column("lng"))) - west) / res).astype(np.int64)
-        ok13 = (rr13 >= 0) & (rr13 < h) & (cc13 >= 0) & (cc13 < w)
-        cells13, rr13, cc13 = cells13[ok13], rr13[ok13], cc13[ok13]
-        pix = rr13 * w + cc13
-
-        def apply(q, rd):
-            p, R, code = rd
-            P = np.zeros((len(pix), 7), np.uint8)
-            o = np.argsort(pix)
-            ps = pix[o]
-
-            # blocks of 64 rows side by side on threads (numpy lets go of the GIL), each writing its
-            # own rows of P
-            def block(r0):
-                r1 = min(h, r0 + 64)
-                a, b = np.searchsorted(ps, [r0 * w, r1 * w])
-                if a == b:
-                    return
-                X, ok = _feats_rows(q, r0, r1)
-                sel = ps[a:b] - r0 * w
-                Xs = np.hstack([X[sel], R[ps[a:b]]])
-                Ps = _pooled(Xs)
-                Pr = _proba(stack, np.hstack([Xs, np.log(np.clip(Ps, 1e-4, 1))])) if stack is not None else Ps
-                Pr = Pr * prior if prior.sum() > 0 else Pr
-                Pr = Pr / np.maximum(Pr.sum(1, keepdims=True), 1e-9)
-                Pr[~ok[sel]] = 0
-                P[o[a:b]] = np.round(255 * Pr).astype(np.uint8)
-
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(4) as ex:
-                list(ex.map(block, range(0, h, 64)))
-            s_ = np.where(np.isfinite(p.ravel()[pix]), np.round(100 * np.nan_to_num(p.ravel()[pix])), 255).astype(np.uint8)
-            return {"cell": cells13, "P": P, "s": s_, "c": code.ravel()[pix].astype(np.uint8)}
-
-        rows = {}
-        for y in years:
-            say(f"the model: reading AlphaEarth {y} at 10 m and running it…")
-            if y == OTF_TEACH_YEAR:
-                q, rd = q_last, last_reading
-            else:
-                g2 = await _aef[y]
-                if g2 is None or g2[0].shape != q_last.shape:
-                    continue
-                q = g2[0]
-                rd = await asyncio.to_thread(reading, q)
-            rows[y] = await asyncio.to_thread(apply, q, rd)
-        fixed = {"cell": cells13, "wsf": wsf.ravel()[pix], "lc": lc.ravel()[pix],
-                 "teach": np.where(lab.ravel()[pix] < 0, 255, lab.ravel()[pix].astype(np.int16)).astype(np.uint8),
-                 "bldg": bldg.ravel()[pix].astype(np.uint8)}
-        # only what is in view is kept (memory): each run replaces the store with its own view
-        STORE["years"] = dict(rows)
-        STORE["fixed"] = fixed
-        STORE["boxes"] = [(tuple(view), set(rows))]
-        STORE["par"] = {}
-        STORE["ver"] += 1
-        info = {"box": list(view), "years": sorted(rows), "scores": {}, "lc_source": lc_src, "overture": rel,
-                "teachers": {OTF_CLASSES[c]: int(counts[c]) for c in range(7) if counts[c]},
-                "left_out": [OTF_CLASSES[c] for c in range(7) if c not in present],
-                "cells": int(len(cells13)), "px": int(h * w),
-                "secs": {"reads": round(t_read, 1), "fit": round(t_fit, 1), "all": round(time.time() - t0, 1)}}
-        STORE["info"].append(info)
-        if held is not None:
-            async def _scores():
-                info["scores"] = await asyncio.to_thread(score, held, prior)
-            asyncio.ensure_future(_scores())
-        return info
-
-    def _parents(res):
-        """Each store row's parent at res (cached until the store changes)."""
-        f = STORE["fixed"]
-        if f is None:
-            return None
-        if res not in STORE["par"]:
-            STORE["par"][res] = f["cell"] if res >= 13 else pa.array(change_resolution(pa.array(f["cell"]), res)).to_numpy(zero_copy_only=False).astype(np.uint64)
-        return STORE["par"][res]
-
-    def otf_on_frame(cellid, res, years):
-        """Per hexagon of a frame, from the store: bytes for the map (class + 1,
-        built share, building share, structure %, ground code, first year built
-        - 2000, coverage), or None when the store has nothing here."""
-        f = STORE["fixed"]
-        n = len(cellid)
-        if f is None or not n:
-            return None
-        par = _parents(res)
-        pos = np.clip(np.searchsorted(cellid, par), 0, n - 1)
-        m = cellid[pos] == par
-        if not m.any():
-            return None
-        hix = pos[m]
-        cnt = np.bincount(hix, minlength=n).astype(np.float32)
-        # a year's rows line up with the fixed rows (same cells, both sorted) when
-        # it covers the same ground; otherwise matched by cell
-        def on_rows(t, col):
-            i = np.clip(np.searchsorted(t["cell"], f["cell"][m]), 0, len(t["cell"]) - 1)
-            hit = t["cell"][i] == f["cell"][m]
-            return t[col][i], hit
-        ys = [y for y in years if y in STORE["years"]] or sorted(STORE["years"])
-        out = np.zeros((n, 7), np.uint8)
-        first = np.zeros(n, np.uint8)
-        for y in ys:
-            P, hit = on_rows(STORE["years"][y], "P")
-            Pm = np.zeros((n, 7), np.float64)
-            for c in range(7):
-                Pm[:, c] = np.bincount(hix, weights=np.where(hit, P[:, c], 0).astype(np.float64), minlength=n)
-            nh = np.bincount(hix, weights=hit.astype(np.float64), minlength=n)
-            Pm /= np.maximum(nh, 1)[:, None] * 255
-            built = Pm[:, list(OTF_BUILT)].sum(1)
-            first = np.where((first == 0) & (built >= 0.5) & (nh > 0), y - 2000, first).astype(np.uint8)
-            if y == ys[-1]:
-                cls_ = np.where(nh > 0, Pm.argmax(1) + 1, 0)
-                S_, hs = on_rows(STORE["years"][y], "s")
-                C_, _ = on_rows(STORE["years"][y], "c")
-                sv = (S_ != 255) & hs
-                smean = np.bincount(hix, weights=np.where(sv, S_, 0).astype(np.float64), minlength=n) / np.maximum(np.bincount(hix, weights=sv.astype(np.float64), minlength=n), 1)
-                gc = np.zeros((n, 6))
-                for k in range(1, 6):
-                    gc[:, k] = np.bincount(hix, weights=((C_ == k) & hs).astype(np.float64), minlength=n)
-                out[:, 0] = cls_
-                out[:, 1] = np.round(255 * np.clip(built, 0, 1))
-                out[:, 2] = np.round(255 * np.clip(Pm[:, 6], 0, 1))
-                out[:, 3] = np.where(nh > 0, np.round(smean), 255)
-                out[:, 4] = np.where(gc.sum(1) > 0, gc.argmax(1), 0)
-        out[:, 5] = first
-        # coverage: the share of a hexagon's res 13 cells the store holds
-        full = 7.0 ** max(0, 13 - res)
-        out[:, 6] = np.round(255 * np.clip(cnt / full, 0, 1))
-        return out
-
-    def otf_card(cellid_hex, res, years):
-        """The model's account of one hexagon, from its res 13 rows."""
-        f = STORE["fixed"]
-        if f is None:
-            return None
-        cell = np.uint64(int(cellid_hex, 16))
-        par = _parents(res)
-        m = par == cell
-        if not m.any():
-            return None
-        out = {"cells": int(m.sum()), "years": []}
-        for y in sorted(STORE["years"]):
-            t = STORE["years"][y]
-            i = np.clip(np.searchsorted(t["cell"], f["cell"][m]), 0, len(t["cell"]) - 1)
-            hit = t["cell"][i] == f["cell"][m]
-            if not hit.any():
-                continue
-            P = t["P"][i[hit]].astype(np.float64).mean(0) / 255
-            s_ = t["s"][i[hit]]
-            c_ = t["c"][i[hit]]
-            out["years"].append({"year": int(y), "shares": [round(float(v), 3) for v in P],
-                                 "structure": None if (s_ == 255).all() else round(float(s_[s_ != 255].mean()), 1),
-                                 "ground": [round(float((c_ == k).mean()), 3) for k in range(1, 6)]})
-        wv = f["wsf"][m]
-        built = wv[wv > 0]
-        out["wsf_built"] = round(float((wv > 0).mean()), 3)
-        out["wsf_half"] = int(np.sort(built)[len(built) // 2]) if len(built) else 0
-        lv = f["lc"][m]
-        out["landcover"] = _IO_NAMES.get(int(np.bincount(lv, minlength=12).argmax()), "none") if len(lv) else "none"
-        out["footprint"] = round(float(f["bldg"][m].mean()), 3)
-        tv = f["teach"][m]
-        out["teachers"] = {OTF_CLASSES[c]: int((tv == c).sum()) for c in range(7) if (tv == c).any()}
-        out["info"] = STORE["info"][-1] if STORE["info"] else None
-        return out
-
-    return OTF_CLASSES, OTF_GROUND, STORE, otf_card, otf_covered, otf_on_frame, otf_run
-
-
-@app.cell
 def _(duckdb):
     # ---- DuckDB: the frame's join and the tables under the map --------------
     con = duckdb.connect()
@@ -2134,482 +1281,11 @@ def _(ADMIN_PQ, HOME, duckdb):
 
 
 @app.cell
-def _(
-    AEF_LEVEL_FOR_RES,
-    GeoTIFF,
-    Image,
-    MOSAIC_MIN_RES,
-    RASTER_TILE,
-    S3Store,
-    WC_BUCKET,
-    WC_CLASSES,
-    WC_MAX_TILES,
-    WC_PREFIX,
-    WC_REGION,
-    WC_S3_OPTS,
-    Window,
-    asyncio,
-    cpu,
-    ctx,
-    io,
-    itertools,
-    math,
-    np,
-    time,
-    xr,
-):
-    # ---- ESA WorldCover: the class shares per hexagon, one fold per (box, res) --
-    # The same fold as AlphaEarth: every pixel's lon/lat and class through the
-    # H3 UDF in DataFusion, a count per class per cell. Below MOSAIC_MIN_RES
-    # it reads the overview whose pixel matches AlphaEarth's for that res
-    # (overview i is 10 * 2^(i + 1) m; the file has six), from there the
-    # native 10 m. The overviews are a sample of the classes, not a blend, so
-    # a share is a count of sampled pixels.
-    _store = S3Store(WC_BUCKET, region=WC_REGION, skip_signature=True, client_options=WC_S3_OPTS)
-    _open = {}
-    _sem = asyncio.Semaphore(32)
-    _seq = itertools.count()
-    WC_CODES = tuple(c for c, _ in WC_CLASSES)
-
-    def _tile_name(lat, lon):
-        """ESA's tile name for the 3 x 3 degree tile whose south-west corner is (lat, lon)."""
-        return f"{'N' if lat >= 0 else 'S'}{abs(lat):02d}{'E' if lon >= 0 else 'W'}{abs(lon):03d}"
-
-    async def _get(name):
-        if name not in _open:
-            async with _sem:
-                try:
-                    _open[name] = await GeoTIFF.open(f"{WC_PREFIX}/ESA_WorldCover_10m_2021_v200_{name}_Map.tif", store=_store)
-                except Exception as e:
-                    # open ocean: ESA has no tile there (async-tiff wraps the 404)
-                    if not (isinstance(e, FileNotFoundError) or "NotFound" in str(e) or "NoSuchKey" in str(e)):
-                        raise
-                    _open[name] = None
-        return _open[name]
-
-    async def _read(lat0, lon0, li, box):
-        """One tile's window under the box: (uint8 classes (h, w), lon of the
-        columns, lat of the rows) or None."""
-        g = await _get(_tile_name(lat0, lon0))
-        if g is None:
-            return None
-        lv = g if li < 0 else g.overviews[li]
-        H, W = lv.shape
-        px = 3.0 / W
-        top = lat0 + 3
-        W_, S_, E_, N_ = box
-        c0, c1 = max(0, int(math.floor((W_ - lon0) / px))), min(W, int(math.ceil((E_ - lon0) / px)))
-        r0, r1 = max(0, int(math.floor((top - N_) / px))), min(H, int(math.ceil((top - S_) / px)))
-        if c1 <= c0 or r1 <= r0:
-            return None
-        async with _sem:
-            ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
-        a = np.asarray(np.ma.filled(ra.as_masked(), 0)).reshape(r1 - r0, c1 - c0)
-        lon = lon0 + (np.arange(c0, c1) + 0.5) * px
-        lat = top - (np.arange(r0, r1) + 0.5) * px
-        return a, lon, lat
-
-    _CNT = ", ".join(f"sum(CASE WHEN c = {code} THEN 1 ELSE 0 END) AS wc{code}" for code in WC_CODES)
-
-    async def wc_fold(box, res):
-        """Per res cell over the box: `nwc` (classified pixels sampled) and one
-        count per class (`wc10` .. `wc100`). (table or None, stats)."""
-        t0 = time.time()
-        W_, S_, E_, N_ = box
-        li = -1 if res >= MOSAIC_MIN_RES else min(5, AEF_LEVEL_FOR_RES[res])
-        lats = range(int(math.floor(S_ / 3)) * 3, int(math.floor(N_ / 3)) * 3 + 1, 3)
-        lons = range(int(math.floor(W_ / 3)) * 3, int(math.floor(E_ / 3)) * 3 + 1, 3)
-        tiles = [(la, lo) for la in lats for lo in lons]
-        if len(tiles) > WC_MAX_TILES:
-            return None, f"land cover: {len(tiles)} tiles under the view; zoom in"
-        parts = [p for p in await asyncio.gather(*(_read(la, lo, li, box) for la, lo in tiles)) if p is not None]
-        if not parts:
-            return None, "land cover: nothing under the view"
-        t1 = time.time()
-
-        def _run():
-            name = f"wc_{next(_seq)}"
-            cls = np.concatenate([p[0].ravel() for p in parts]).astype(np.int16)
-            lon = np.concatenate([np.broadcast_to(p[1][None, :], p[0].shape).ravel() for p in parts])
-            lat = np.concatenate([np.broadcast_to(p[2][:, None], p[0].shape).ravel() for p in parts])
-            ctx.from_dataset(
-                name,
-                xr.Dataset({"c": (("i",), cls), "lat": (("i",), lat), "lon": (("i",), lon)}, coords={"i": np.arange(cls.size)}),
-                chunks={"i": 262_144},
-            )
-            try:
-                return ctx.sql(f"""
-                    SELECT h3_latlng_to_cell(lat, lon, CAST({res} AS INT)) AS cell, count(*) AS nwc, {_CNT}
-                    FROM {name}
-                    WHERE c > 0 AND lon >= {W_} AND lon < {E_} AND lat >= {S_} AND lat < {N_}
-                    GROUP BY cell
-                """).to_arrow_table()
-            finally:
-                ctx.deregister_table(name)
-
-        out = await cpu(_run)
-        lvl = "10 m" if li < 0 else f"ov{li} ({10 * 2 ** (li + 1)} m)"
-        return out, f"land cover {lvl} {len(parts)} tiles read {t1 - t0:.1f} s · fold {out.num_rows:,} {time.time() - t1:.1f} s"
-
-    return WC_CODES, wc_fold
-
-
-@app.cell
-def _(
-    GeoTIFF,
-    IO_CLASSES,
-    IO_COLLECTION,
-    IO_STAC,
-    IO_TOKEN,
-    LC_ROAD_W,
-    LC_VOCAB,
-    OV_TILES,
-    Transformer,
-    Window,
-    asyncio,
-    coordinates_to_cells,
-    cpu,
-    duckdb,
-    json,
-    math,
-    np,
-    pa,
-    time,
-):
-    # ---- the land cover teachers (see LC_* and IO_* in the constants) ----------
-    # Both fold to the FINER cells (the ones AlphaEarth is folded to), so each
-    # finer cell gets its own label. Nothing is saved.
-    import urllib.request as _ur
-    import threading as _th
-    from obstore.store import AzureStore as _AzureStore
-    from h3ronpy.vector import wkb_to_cells as _wkb_to_cells
-    import pyarrow.compute as _pc
-
-    _NV = len(LC_VOCAB)
-    # Impact Observatory's class code -> LC_VOCAB index (-1 teaches nothing)
-    _IO_LUT = np.full(256, -1, np.int16)
-    for _c, _nm in IO_CLASSES.items():
-        _IO_LUT[_c] = LC_VOCAB.index(_nm)
-    # an H3 cell's edge in m: Impact Observatory is read from the overview
-    # whose pixel is at most about half of it (res 10: 40 m, about nine
-    # pixels a cell), roads get a point every quarter of it (5 m at least)
-    _EDGE_M = {7: 1406, 8: 531, 9: 201, 10: 76, 11: 29, 12: 11, 13: 4, 14: 2, 15: 1}
-
-    # Impact Observatory, on Planetary Computer: one 10 m COG (UTM, five
-    # overviews) per zone per year, read with a SAS token that lasts about an
-    # hour (asked again after 30 min). The STAC search is kept per box.
-    _io = {"store": None, "at": 0.0, "open": {}, "items": {}}
-    _io_sem = asyncio.Semaphore(8)
-
-    def _io_json(req, tries=4):
-        # the token and the search sometimes stall for longer than the timeout:
-        # ask again rather than lose the year
-        for k in range(tries):
-            try:
-                return json.load(_ur.urlopen(req, timeout=20))
-            except (TimeoutError, OSError):
-                if k == tries - 1:
-                    raise
-                time.sleep(2 * (k + 1))
-
-    def _io_store(account):
-        if _io["store"] is None or time.time() - _io["at"] > 1800:
-            tok = _io_json(IO_TOKEN)["token"]
-            _io.update(store=_AzureStore(account_name=account, container_name="io-lulc", sas_key=tok), at=time.time(), open={})
-        return _io["store"]
-
-    def _io_search(box):
-        k = tuple(round(v, 3) for v in box)
-        if k not in _io["items"]:
-            q = json.dumps({"collections": [IO_COLLECTION], "bbox": list(box), "limit": 250}).encode()
-            r = _io_json(_ur.Request(IO_STAC, q, {"content-type": "application/json"}))
-            _io["items"][k] = [(int(f["properties"]["start_datetime"][:4]), f["assets"]["data"]["href"]) for f in r["features"]]
-        return _io["items"][k]
-
-    async def _io_part(href, box, fres):
-        account = href.split("//")[1].split(".")[0]
-        path = href.split("/io-lulc/")[1]
-        store = await asyncio.to_thread(_io_store, account)
-        async with _io_sem:
-            g = _io["open"].get(path)
-            if g is None:
-                g = _io["open"][path] = await GeoTIFF.open(path, store=store)
-        edge = _EDGE_M.get(fres, 1)
-        li = -1
-        for i in range(len(g.overviews)):
-            if 20 * 2 ** i <= edge / 1.8:
-                li = i
-        lv = g if li < 0 else g.overviews[li]
-        f = 1 if li < 0 else 2 ** (li + 1)
-        T = g.transform
-        px, py = T.a * f, T.e * f
-        W_, S_, E_, N_ = box
-        xs, ys = Transformer.from_crs("EPSG:4326", g.crs, always_xy=True).transform([W_, E_, W_, E_], [S_, S_, N_, N_])
-        H, Wd = lv.shape
-        c0, c1 = max(0, math.floor((min(xs) - T.c) / px)), min(Wd, math.ceil((max(xs) - T.c) / px))
-        r0, r1 = max(0, math.floor((max(ys) - T.f) / py)), min(H, math.ceil((min(ys) - T.f) / py))
-        if c1 <= c0 or r1 <= r0:
-            return None
-        async with _io_sem:
-            ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
-        a = np.asarray(np.ma.filled(ra.as_masked(), 0)).reshape(r1 - r0, c1 - c0)
-        return a, (T.c, T.f, px, py, c0, r0), g.crs, li
-
-    def _lonlat(tr, xs, ys, G=16):
-        # every pixel's lon, lat from a grid every G pixels, bilinear between
-        # (UTM to lon/lat bends far less than a pixel over G pixels)
-        ci = np.unique(np.r_[np.arange(0, len(xs), G), len(xs) - 1])
-        ri = np.unique(np.r_[np.arange(0, len(ys), G), len(ys) - 1])
-        gx, gy = np.meshgrid(xs[ci], ys[ri])
-        out = []
-        for g in tr.transform(gx, gy):
-            a = np.stack([np.interp(np.arange(len(xs)), ci, row) for row in np.asarray(g)])
-            out.append(np.stack([np.interp(np.arange(len(ys)), ri, a[:, j]) for j in range(a.shape[1])], 1))
-        return out
-
-    def _io_count(parts, box, fres):
-        W_, S_, E_, N_ = box
-        cs, ks = [], []
-        for a, (x0, y0, px, py, c0, r0), crs, _ in parts:
-            k = _IO_LUT[a.astype(np.int64)]
-            rr, cc = np.nonzero(k >= 0)
-            LON, LAT = _lonlat(Transformer.from_crs(crs, "EPSG:4326", always_xy=True),
-                               x0 + (c0 + np.arange(a.shape[1]) + 0.5) * px, y0 + (r0 + np.arange(a.shape[0]) + 0.5) * py)
-            lon, lat = LON[rr, cc], LAT[rr, cc]
-            inb = (lon >= W_) & (lon < E_) & (lat >= S_) & (lat < N_)
-            cs.append(pa.array(coordinates_to_cells(lat[inb], lon[inb], fres)).to_numpy(zero_copy_only=False).astype(np.uint64))
-            ks.append(k[rr[inb], cc[inb]])
-        if not cs or not sum(len(c) for c in cs):
-            return None
-        u, inv = np.unique(np.concatenate(cs), return_inverse=True)
-        M = np.bincount(inv * _NV + np.concatenate(ks), minlength=len(u) * _NV).reshape(len(u), _NV).astype(np.uint32)
-        return {"cell": u, "counts": M}
-
-    async def io_fold(box, fres, y):
-        """Impact Observatory's land cover in year y (2017..2023), per finer
-        cell: {"cell": sorted uint64, "counts": (n, len(LC_VOCAB)) pixels per
-        class} or None, and a status line."""
-        t0 = time.time()
-        try:
-            items = [h for yy, h in await asyncio.to_thread(_io_search, box) if yy == y]
-            if not items:
-                return None, f"Impact Observatory {y}: nothing here"
-            parts = [p for p in await asyncio.gather(*(_io_part(h, box, fres) for h in items)) if p is not None]
-            t1 = time.time()
-            out = await cpu(_io_count, parts, box, fres) if parts else None
-            lvl = "10 m" if not parts or parts[0][3] < 0 else f"{20 * 2 ** parts[0][3]} m"
-            return out, f"Impact Observatory {y} {lvl} read {t1 - t0:.1f} s, fold {time.time() - t1:.1f} s"
-        except Exception as e:
-            return None, f"Impact Observatory {y}: {type(e).__name__}: {e}"
-
-    # Overture from its own PMTiles: the vector tiles under the box, fetched
-    # together (transportation at zoom 14, land use at zoom 13; about 8 MB and
-    # 4 s for a 20 x 12 km view, against 13 s for DuckDB over the GeoParquet).
-    # Major roads and rail become road area per finer cell (a point every
-    # quarter cell edge along each line, 5 m at least, each worth that length
-    # x the class's width; only points inside their own tile, so the tile
-    # buffers do not count twice), and land use polygons the finer cells whose
-    # centers they hold (1 built-up, 2 construction).
-    import gzip as _gz
-    import struct as _st
-    import obstore as _obs
-    from obstore.store import S3Store as _S3
-    import mapbox_vector_tile as _mvt
-    from pmtiles.tile import deserialize_directory as _pm_dir, deserialize_header as _pm_head, find_tile as _pm_find, zxy_to_tileid as _pm_id
-
-    _ovs = _S3(OV_TILES[0], region="us-west-2", skip_signature=True)
-    _pm_kept = {}  # (path, offset, length) -> the header or a directory's bytes, in flight or read
-
-    async def _pm_bytes(path, off, n):
-        k = (path, off, n)
-        if k not in _pm_kept:
-            _pm_kept[k] = asyncio.ensure_future(_obs.get_range_async(_ovs, path, start=off, length=n))
-        return bytes(await _pm_kept[k])
-
-    async def _pm_tiles(name, z, box):
-        """The tiles of OV_TILES/<name>.pmtiles at zoom z under the box: [(x, y, bytes)]."""
-        path = f"{OV_TILES[1]}/{name}.pmtiles"
-        h = _pm_head(await _pm_bytes(path, 0, 127))
-        n = 2 ** z
-        W_, S_, E_, N_ = box
-        ty = lambda la: int((1 - math.asinh(math.tan(math.radians(la))) / math.pi) / 2 * n)
-        x0, x1 = int((W_ + 180) / 360 * n), int((E_ + 180) / 360 * n)
-
-        async def one(x, y):
-            tid, o, ln = _pm_id(z, x, y), h["root_offset"], h["root_length"]
-            for _ in range(4):
-                e = _pm_find(_pm_dir(await _pm_bytes(path, o, ln)), tid)
-                if e is None:
-                    return None
-                if e.run_length > 0:
-                    b = bytes(await _obs.get_range_async(_ovs, path, start=h["tile_data_offset"] + e.offset, length=e.length))
-                    return x, y, (_gz.decompress(b) if b[:2] == b"\x1f\x8b" else b)
-                o, ln = h["leaf_directory_offset"] + e.offset, e.length
-            return None
-
-        got = await asyncio.gather(*(one(x, y) for x in range(x0, x1 + 1) for y in range(ty(N_), ty(S_) + 1)))
-        return [g for g in got if g is not None], n
-
-    def _tile_lonlat(xy, x, y, n, ext):
-        # tile pixels (y down) to lon, lat
-        lon = (x + xy[:, 0] / ext) / n * 360 - 180
-        lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + xy[:, 1] / ext) / n))))
-        return lon, lat
-
-    def _ov_roads(tiles, n, step):
-        lat_, lon_, a_ = [], [], []
-        for x, y, b in tiles:
-            lay = _mvt.decode(b, default_options={"y_coord_down": True}).get("segment")
-            if not lay:
-                continue
-            ext = lay.get("extent", 4096)
-            for f in lay["features"]:
-                w = LC_ROAD_W.get(f["properties"].get("class"))
-                if w is None:
-                    continue
-                g = f["geometry"]
-                lines = [g["coordinates"]] if g["type"] == "LineString" else g["coordinates"] if g["type"] == "MultiLineString" else []
-                for ln in lines:
-                    xy = np.asarray(ln, np.float64)
-                    if len(xy) < 2:
-                        continue
-                    lon, lat = _tile_lonlat(xy, x, y, n, ext)
-                    dx = np.diff(lon) * 111320 * np.cos(np.radians(lat[:-1]))
-                    dy = np.diff(lat) * 110574
-                    cum = np.r_[0, np.cumsum(np.hypot(dx, dy))]
-                    m = cum[-1]
-                    if m <= 0:
-                        continue
-                    k = max(1, math.ceil(m / step))
-                    t = (np.arange(k) + 0.5) * m / k
-                    px = np.interp(t, cum, xy[:, 0])
-                    py = np.interp(t, cum, xy[:, 1])
-                    own = (px >= 0) & (px < ext) & (py >= 0) & (py < ext)  # this tile's own points only
-                    if own.any():
-                        lo, la = _tile_lonlat(np.stack([px[own], py[own]], 1), x, y, n, ext)
-                        lon_.append(lo)
-                        lat_.append(la)
-                        a_.append(np.full(own.sum(), w * m / k))
-        cat = lambda v: np.concatenate(v) if v else np.zeros(0)
-        return pa.table({"lat": cat(lat_), "lon": cat(lon_), "a": cat(a_)})
-
-    def _ov_landuse(tiles, n):
-        ks, wkbs = [], []
-        for x, y, b in tiles:
-            lay = _mvt.decode(b, default_options={"y_coord_down": True}).get("land_use")
-            if not lay:
-                continue
-            ext = lay.get("extent", 4096)
-            for f in lay["features"]:
-                pr, g = f["properties"], f["geometry"]
-                if not (pr.get("subtype") in ("construction", "resource_extraction") or pr.get("class") in ("industrial", "residential", "landfill")):
-                    continue
-                # GREENFIELD IS NOT CONSTRUCTION: Overture's construction subtype has class greenfield
-                # for land planned but not broken. In north Phoenix ("TSMC Innovation Corridor", "Halo
-                # Vista") ~9 km2 of untouched desert taught the reader desert was construction
-                if pr.get("class") == "greenfield":
-                    continue
-                polys = [g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"] if g["type"] == "MultiPolygon" else []
-                parts = []
-                for rings in polys:
-                    rb = []
-                    for r in rings:
-                        xy = np.asarray(r, np.float64)
-                        if len(xy) < 3:
-                            continue
-                        if (xy[0] != xy[-1]).any():
-                            xy = np.vstack([xy, xy[:1]])
-                        lon, lat = _tile_lonlat(xy, x, y, n, ext)
-                        rb.append(_st.pack("<I", len(xy)) + np.stack([lon, lat], 1).astype("<f8").tobytes())
-                    if rb:
-                        parts.append(_st.pack("<BII", 1, 3, len(rb)) + b"".join(rb))
-                if parts:
-                    ks.append(2 if pr.get("subtype") in ("construction", "resource_extraction") or pr.get("class") == "landfill" else 1)
-                    wkbs.append(parts[0] if len(parts) == 1 else _st.pack("<BII", 1, 6, len(parts)) + b"".join(parts))
-        return pa.table({"k": pa.array(ks, pa.uint8()), "wkb": pa.array(wkbs, pa.binary())})
-
-    def _ov_cells(roads, lu, fres):
-        rc = pa.array(coordinates_to_cells(roads["lat"].to_numpy(), roads["lon"].to_numpy(), fres)).to_numpy(zero_copy_only=False).astype(np.uint64) if roads.num_rows else np.zeros(0, np.uint64)
-        ra = roads["a"].to_numpy() if roads.num_rows else np.zeros(0)
-        lc_, lk_ = np.zeros(0, np.uint64), np.zeros(0, np.uint8)
-        if lu.num_rows:
-            lists = pa.array(_wkb_to_cells(lu["wkb"].combine_chunks(), fres))
-            lens = _pc.list_value_length(lists).to_numpy(zero_copy_only=False)
-            lc_ = _pc.list_flatten(lists).to_numpy(zero_copy_only=False).astype(np.uint64)
-            lk_ = np.repeat(lu["k"].to_numpy().astype(np.uint8), np.nan_to_num(lens).astype(np.int64))
-        u = np.unique(np.concatenate([rc, lc_]))
-        road = np.zeros(len(u))
-        np.add.at(road, np.searchsorted(u, rc), ra)
-        lu_k = np.zeros(len(u), np.uint8)
-        np.maximum.at(lu_k, np.searchsorted(u, lc_), lk_)  # construction over built-up
-        return {"cell": u, "road_m2": road, "lu": lu_k}
-
-    async def ov_fold(box, fres):
-        """Overture roads and land use per finer cell: {"cell": sorted uint64,
-        "road_m2", "lu" (0 none, 1 built-up, 2 construction)} or None, and a
-        status line."""
-        t0 = time.time()
-        try:
-            step = max(5, round(_EDGE_M.get(fres, 20) / 4))
-            # zoomed out, Overture's coarser tiles: a zoom 9 view is ~16,000 tiles at 14 and 13. Roads at 14 from finer
-            # cells at res 11, one tile zoom less per res coarser, 11 at the least; they keep the
-            # major roads, the only ones that make a road cell. Land use one zoom under the roads
-            zr = max(11, min(14, fres + 3))
-            (rt, rn), (lt, ln) = await asyncio.gather(_pm_tiles("transportation", zr, box), _pm_tiles("base", zr - 1, box))
-            t1 = time.time()
-
-            def _job():
-                roads, lu = _ov_roads(rt, rn, step), _ov_landuse(lt, ln)
-                return roads, lu, _ov_cells(roads, lu, fres)
-
-            roads, lu, out = await cpu(_job)
-            return out, (f"Overture PMTiles z{zr}/{zr - 1} {len(rt) + len(lt)} tiles {sum(len(t[2]) for t in rt + lt) / 1e6:.1f} MB read {t1 - t0:.1f} s, "
-                         f"{roads.num_rows:,} road points, {lu.num_rows:,} land use polygons, fold {time.time() - t1:.1f} s")
-        except Exception as e:
-            return None, f"Overture: {type(e).__name__}: {e}"
-
-    return io_fold, ov_fold
-
-
-@app.cell
-def _(
-    AEF_YEARS_ALL,
-    BUILT_LC,
-    BUILT_SHARE,
-    HIST_RESTLESS,
-    KINDS_K,
-    KINDS_ON,
-    KINDS_TOP,
-    LC_CAP,
-    LC_MIN,
-    LC_PURE,
-    LC_ROAD_FILL,
-    LC_VOCAB,
-    NEW_FROM,
-    WC_CLASSES,
-    WC_CODES,
-    change_resolution,
-    con,
-    np,
-    os,
-    pa,
-):
-    # ---- a FRAME: AlphaEarth over the window, the land cover beside it ----------
-    # The fill is how much the fingerprint moved between the window's two ends, stretched
-    # to this view's p2..p98. The change year is the year whose step stands
-    # out most against THAT YEAR'S median step in view: the embeddings shift
-    # as a whole between some years (measured over Lagos, 2026-09-25: the
-    # 2024 to 2025 median step is 0.034, the others 0.012 to 0.022), so the
-    # raw biggest step lands on 2025 almost everywhere. Each step is divided
-    # by its year's median; the card shows those ratios against 1.
-    #
-    # CARRY THE PEAK: the years arrive folded at a finer res than the
-    # hexagons (about a pixel of the read per finer cell). Steps, change and
-    # change year are worked out per finer cell; each hexagon then takes the
-    # finer cell that moved most, whole (its change, its year, its steps).
-    # A hexagon reads "the most-changed patch in here", not "the average of
-    # in here", so one changed site is not diluted by the quiet ground around it.
-    _WC_NAME = dict(WC_CLASSES)
+def _(change_resolution, np, os, pa):
+    # ---- a FRAME: Earthwork between the window's first and last year ------------
+    # CARRY THE PEAK: the years arrive folded at a finer res than the hexagons (about a pixel of the
+    # read per finer cell). Every finer cell is scored, and each hexagon takes its highest-scoring
+    # finer cell, so one dig is not averaged away by the quiet ground around it.
     # EARTHWORK: earthwork_model.py's logistic regression on [b, a, a * b, (a - b)^2], b and a the unit
     # AlphaEarth vectors of the window's first and last year
     _ew = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "earthwork-lr.npz"))
@@ -2627,375 +1303,37 @@ def _(
             out[i:i + chunk] = np.where(ok, 1 / (1 + np.exp(-z)), np.nan)
         return out
 
-    from h3ronpy import cells_area_m2 as _cells_area_m2
-    from concurrent.futures import ThreadPoolExecutor as _TPE
-    # the land cover reader's years train side by side (numpy lets go of the
-    # GIL in the matrix products): its own pool, as the frame itself runs on
-    # the cpu pool
-    _lc_pool = _TPE(4, thread_name_prefix="lc")
-
-    # WorldCover's classes in LC_VOCAB (the stand-in teacher)
-    _WC_LC = {10: "trees", 20: "grass", 30: "grass", 40: "cropland", 50: "built-up", 60: "bare",
-              80: "water", 90: "wetland", 95: "wetland", 100: "grass"}
-    _NV = len(LC_VOCAB)
-
-    # LAND COVER READ FROM ALPHAEARTH (see LC_* in the constants): a softmax
-    # regression on [1, 64 numbers], Adam on the cross-entropy, classes
-    # balanced to LC_CAP examples each. One per year. Returns a reader
-    # (rows -> LC_VOCAB index, -1 where a row has no vector) or None.
-    def _lc_fit(X, lab, seed, iters=250, l2=1e-3, lr=0.05):
-        rng = np.random.default_rng(seed)
-        ok = (lab >= 0) & np.isfinite(X).all(1)
-        cls = [c for c in range(_NV) if (ok & (lab == c)).sum() >= LC_MIN]
-        if len(cls) < 2:
-            return None, {}
-        b = np.concatenate([(lambda i: i if len(i) <= LC_CAP else rng.choice(i, LC_CAP, replace=False))(np.flatnonzero(ok & (lab == c))) for c in cls])
-        Xb = np.c_[np.ones(len(b)), X[b]].astype(np.float32)
-        Yo = np.eye(len(cls), dtype=np.float32)[np.searchsorted(cls, lab[b])]
-        Wt = np.zeros((Xb.shape[1], len(cls)), np.float32)
-        m1, m2 = np.zeros_like(Wt), np.zeros_like(Wt)
-        for it in range(1, iters + 1):
-            Z = Xb @ Wt
-            Z -= Z.max(1, keepdims=True)
-            P = np.exp(Z)
-            P /= P.sum(1, keepdims=True)
-            g = Xb.T @ (P - Yo) / len(Xb) + l2 * Wt
-            m1 = 0.9 * m1 + 0.1 * g
-            m2 = 0.999 * m2 + 0.001 * g * g
-            Wt -= lr * (m1 / (1 - 0.9 ** it)) / (np.sqrt(m2 / (1 - 0.999 ** it)) + 1e-8)
-        cl = np.asarray(cls)
-
-        def read(V):
-            good = np.isfinite(V).all(1)
-            out = cl[np.argmax(np.c_[np.ones(len(V)), np.nan_to_num(V)] @ Wt, 1)]
-            return np.where(good, out, -1)
-
-        return read, {LC_VOCAB[c]: int((ok & (lab == c)).sum()) for c in cls}
-
-    def _pure(counts):
-        # a finer cell's class when LC_PURE of it is one class, else -1
-        tot = counts.sum(1)
-        j = counts.argmax(1)
-        return np.where((tot > 0) & (counts.max(1) >= LC_PURE * np.maximum(tot, 1)), j, -1)
-
-    def _on(fine, t, col):
-        # a teacher's column on the frame's finer cells (0 where it has none)
-        if t is None or not len(t["cell"]):
-            return np.zeros((len(fine),) + np.shape(t[col])[1:] if t is not None else (len(fine),))
-        pos = np.clip(np.searchsorted(t["cell"], fine), 0, len(t["cell"]) - 1)
-        m = t["cell"][pos] == fine
-        v = np.asarray(t[col])[pos]
-        return np.where(m.reshape((-1,) + (1,) * (v.ndim - 1)), v, 0)
-
-    # THE WHOLE HISTORY, per picked finer cell (see HIST_* in the constants).
-    # Its change year k splits the years into before and after; `mb` is the
-    # ground before (the mean of those years' vectors). The embeddings drift
-    # as a whole from year to year, so late years sit far from early ones
-    # everywhere: every test compares like with like. Steps are multiples of
-    # their year's median step in view (`hrel`), and "came back" asks
-    # whether the last year is closer to the ground before than to year k.
-    # Codes: 0 unknown, 1 one step that held, 2 came back, 3 changes this
-    # much most years, 4 kept moving, 5 too recent to tell (k is the last year).
-    HIST_KIND = {1: "held", 2: "came back", 3: "changes most years", 4: "kept moving", 5: "too recent"}
-
-    def _trajectory(Vs, hyears, hrel, idx, kyr):
-        m, T = len(idx), len(hyears)
-        yrs = np.array(hyears)
-        kyr = np.asarray(kyr)
-        kt = np.clip(np.searchsorted(yrs, kyr), 0, T - 1)
-        valid = (kyr > yrs[0]) & (yrs[kt] == kyr)
-        mb = np.zeros((m, 64), np.float32)
-        for y in hyears:
-            V = Vs[y][idx]
-            valid &= np.isfinite(V).all(1)
-            mb += np.where((y < kyr)[:, None], np.nan_to_num(V), 0.0)
-        mb /= np.maximum(np.linalg.norm(mb, axis=1), 1e-9)[:, None]
-        kc = np.clip(kt, 1, T - 1)
-        VL = np.nan_to_num(Vs[hyears[-1]][idx])
-        Vk = np.nan_to_num(np.stack([Vs[y][idx] for y in hyears], 0)[kc, np.arange(m)])
-        back = (1.0 - np.einsum("ij,ij->i", VL, mb)) < (1.0 - np.einsum("ij,ij->i", VL, Vk))
-        r = hrel[:, idx].T  # (m, T - 1): column t is the step into year t + 1
-        col = np.arange(T - 1)[None, :]
-        rk = r[np.arange(m), kc - 1]
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            noise = np.nanmedian(np.where(col == (kc - 1)[:, None], np.nan, r), 1)
-            after = np.nanmedian(np.where(col > (kc - 1)[:, None], r, np.nan), 1)
-        ratio = np.where(noise > 0, rk / noise, np.nan).astype(np.float32)
-        # kept moving: the years after k still step HIST_RESTLESS times the usual
-        growing = (after >= HIST_RESTLESS) & ((T - 1 - kc) >= 2)
-        code = np.select(
-            [~valid, kc == T - 1, ratio < HIST_RESTLESS, back, growing],
-            [0, 5, 3, 2, 4], 1).astype(np.uint8)
-        return code, ratio
-
-    # KINDS OF CHANGE (see KINDS_* in the constants): spherical k-means on
-    # unit change directions, k-means++ start, fit on a sample, every moved
-    # cell assigned to its nearest kind; kinds numbered largest first.
-    def _kinds(X, k, seed=0, iters=30, sample=20000):
-        rng = np.random.default_rng(seed)
-        S = X[rng.choice(len(X), min(len(X), sample), replace=False)]
-        C = [S[rng.integers(len(S))]]
-        for _ in range(1, k):
-            d = np.clip(1.0 - np.max(S @ np.array(C).T, 1), 0, None)
-            C.append(S[rng.choice(len(S), p=d / d.sum())] if d.sum() > 0 else S[rng.integers(len(S))])
-        C = np.array(C)
-        for _ in range(iters):
-            a = np.argmax(S @ C.T, 1)
-            Cn = np.stack([S[a == j].sum(0) if (a == j).any() else C[j] for j in range(k)])
-            Cn /= np.maximum(np.linalg.norm(Cn, axis=1), 1e-9)[:, None]
-            done = np.abs(Cn - C).max() < 1e-5
-            C = Cn
-            if done:
-                break
-        lab = np.argmax(X @ C.T, 1)
-        rank = np.empty(k, np.int64)
-        rank[np.argsort(-np.bincount(lab, minlength=k))] = np.arange(k)
-        return rank[lab]
-
-    def build_frame(aef_by_year, wc, y0, y1, res, hist=False, teach=None, built_only=True):
-        years = [y for y in range(y0, y1 + 1) if aef_by_year.get(y) is not None]
-        if len(years) < 2:
+    def build_frame(aef_by_year, y0, y1, res):
+        if aef_by_year.get(y0) is None or aef_by_year.get(y1) is None:
             return None
-        # every year read when the whole history is asked for, the window's otherwise
-        hyears = sorted(y for y, t in aef_by_year.items() if t is not None) if hist else years
-        # every year on the first year's cells (sorted, see _compact), NaN
-        # where a year has none; not changed in place below
-        base = aef_by_year[years[0]]["cell"]
+        # both years on the first year's cells (sorted, see _compact), NaN where the last has none
+        base = aef_by_year[y0]["cell"]
         nfine = len(base)
-
-        def _V(y):
-            t = aef_by_year[y]
-            if t["cell"] is base:
-                return t["V"]
-            V = np.full((nfine, 64), np.nan, np.float32)
+        t = aef_by_year[y1]
+        if t["cell"] is base:
+            Vl = t["V"]
+        else:
+            Vl = np.full((nfine, 64), np.nan, np.float32)
             if len(t["cell"]):
                 pos = np.clip(np.searchsorted(t["cell"], base), 0, len(t["cell"]) - 1)
                 m_ = t["cell"][pos] == base
-                V[m_] = t["V"][pos[m_]]
-            return V
-
-        Vs = {y: _V(y) for y in hyears}
-        step_years = list(zip(years[:-1], years[1:]))
-        steps = np.stack([(1.0 - np.einsum("ij,ij->i", Vs[a], Vs[b])).astype(np.float32) for a, b in step_years], 0)
-        disp = (1.0 - np.einsum("ij,ij->i", Vs[years[0]], Vs[years[-1]])).astype(np.float32)
-        has = ~np.isnan(steps).all(0)
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            med = np.nanmedian(steps, axis=1)
-        med = np.where(np.isfinite(med) & (med > 0), med, np.nan).astype(np.float32)
-        rel = steps / med[:, None]
-        k = np.argmax(np.where(np.isnan(rel), -np.inf, rel), 0)
-        yb = np.array([b for _, b in step_years], np.int64)
-        big = np.where(has, yb[k], -2).astype(np.int64)
-        Vf_, Vl_ = Vs[years[0]], Vs[years[-1]]
-        hist = hist and len(hyears) > len(years)
-        if hist:
-            hstep_years = list(zip(hyears[:-1], hyears[1:]))
-            hsteps = np.stack([(1.0 - np.einsum("ij,ij->i", Vs[a], Vs[b])).astype(np.float32) for a, b in hstep_years], 0)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", RuntimeWarning)
-                hmed = np.nanmedian(hsteps, axis=1)
-            hmed = np.where(np.isfinite(hmed) & (hmed > 0), hmed, np.nan).astype(np.float32)
-            hrel = hsteps / hmed[:, None]
-
-        # the hexagons (each finer cell's parent), then what is there, then the
-        # land cover read from AlphaEarth, then the kinds and each hexagon's peak
-        fine = base
-        par = pa.array(change_resolution(fine, res)).to_numpy(zero_copy_only=False).astype(np.uint64)
+                Vl[m_] = t["V"][pos[m_]]
+        par = pa.array(change_resolution(base, res)).to_numpy(zero_copy_only=False).astype(np.uint64)
         cellid = np.unique(par)
         n = len(cellid)
-        disp_f = disp
-        # earthwork: each hexagon takes its highest-scoring finer cell, so one dig is not averaged away
-        earth_f = _earthwork(Vf_, Vl_)
+        hix = np.searchsorted(cellid, par)
+        earth_f = _earthwork(aef_by_year[y0]["V"], Vl)
         earth = np.full(n, -1.0, np.float32)
         okf = np.isfinite(earth_f)
         if n and okf.any():
-            np.maximum.at(earth, np.searchsorted(cellid, par)[okf], earth_f[okf])
+            np.maximum.at(earth, hix[okf], earth_f[okf])
         earth = np.where(earth >= 0, earth, np.nan).astype(np.float32)
-
-        nwc = np.zeros(n)
-        share = np.zeros((n, len(WC_CODES)))
-        if wc is not None and wc.num_rows:
-            wcell = wc["cell"].to_numpy().astype(np.uint64)
-            ow = np.argsort(wcell)
-            wcell = wcell[ow]
-            pos = np.clip(np.searchsorted(wcell, cellid), 0, len(wcell) - 1)
-            m = wcell[pos] == cellid
-            wn = np.nan_to_num(wc["nwc"].to_numpy(zero_copy_only=False).astype(np.float64))[ow]
-            nwc = np.where(m, wn[pos], 0.0)
-            C = np.stack([np.nan_to_num(wc[f"wc{c}"].to_numpy(zero_copy_only=False).astype(np.float64))[ow][pos] for c in WC_CODES], 1)
-            share = np.where(m[:, None], C, 0.0) / np.maximum(nwc, 1)[:, None]
-        top = np.where(nwc > 0, share.argmax(1), -1)
-        top_share = np.where(nwc > 0, share.max(1), 0.0)
-
-        # land cover read from AlphaEarth, every year (see LC_* in the constants)
-        lyears = hyears if hist else years
-        teach = teach or {}
-        io_t, ov_t = teach.get("io") or {}, teach.get("ov")
-        quiet_f = np.isfinite(disp_f) & (disp_f <= float(np.nanmedian(disp_f))) if np.isfinite(disp_f).any() else np.zeros(nfine, bool)
-        io_lab = {y: _pure(_on(fine, t, "counts")) for y, t in io_t.items() if t is not None}
-        ov_lab = np.full(nfine, -1)
-        if ov_t is not None:
-            lu = _on(fine, ov_t, "lu")
-            ov_lab = np.where(lu == 2, LC_VOCAB.index("construction"), np.where(lu == 1, LC_VOCAB.index("built-up"), -1))
-            cell_m2 = float(np.mean(pa.array(_cells_area_m2(pa.array(fine[:1000]))).to_numpy(zero_copy_only=False))) if nfine else 1.0
-            ov_lab = np.where(_on(fine, ov_t, "road_m2") >= LC_ROAD_FILL * cell_m2, LC_VOCAB.index("road"), ov_lab)
-        src = []
-        if io_lab:
-            src.append("Impact Observatory " + (f"{min(io_lab)}" if len(io_lab) == 1 else f"{min(io_lab)} to {max(io_lab)}"))
-            wc_lab = None
-        else:
-            # the stand-in: WorldCover 2021 on hexagons mostly one class
-            wc_lab = np.full(nfine, -1)
-            if n and (nwc > 0).any():
-                hix = np.searchsorted(cellid, par)
-                t_ = np.where((top_share >= LC_PURE) & (top >= 0), top, -1)[hix]
-                wc_lab = np.where(t_ >= 0, np.array([LC_VOCAB.index(_WC_LC[c]) if c in _WC_LC else -1 for c in WC_CODES] + [-1])[t_], -1)
-            src.append("ESA WorldCover 2021")  # Impact Observatory is not read in this notebook (see _teach_need)
-        if ov_t is not None:
-            src.append("Overture")
-        last = AEF_YEARS_ALL[-1]
-        labs = {}
-        for y in lyears:
-            if io_lab:
-                if y in io_lab:
-                    lab = io_lab[y].copy()  # the map of this very year, all ground
-                else:
-                    ny_ = min(io_lab, key=lambda k: abs(k - y))
-                    lab = np.where(quiet_f, io_lab[ny_], -1)
-            else:
-                lab = np.where(quiet_f, wc_lab, -1) if y != 2021 else wc_lab.copy()
-            # Overture is today's: the last year on all ground, earlier only quiet
-            ov_y = ov_lab if y == last else np.where(quiet_f, ov_lab, -1)
-            labs[y] = np.where(ov_y >= 0, ov_y, lab)
-        fits = dict(zip(lyears, _lc_pool.map(lambda y: _lc_fit(Vs[y], labs[y], seed=y), lyears)))
-        readers = {y: f[0] for y, f in fits.items()}
-        lc_n = fits[years[-1]][1] if years[-1] in fits else {}
-        _none = lambda V: np.full(len(V), -1, np.int64)
-        lc_f0, lc_f1 = (readers[years[0]] or _none)(Vf_), (readers[years[-1]] or _none)(Vl_)
-        # BUILT ONLY (as the screenshot notebook): the finer cells AlphaEarth reads as built-up, road or
-        # construction (BUILT_LC) in the last year read are the only ones grouped, and a hexagon's
-        # peak is its most-changed built finer cell
-        built_f = np.isin(lc_f1, BUILT_LC) if built_only else np.ones(nfine, bool)
-
-        # kinds of change, per finer cell: 0 did not move enough to group
-        kind_f = np.zeros(nfine, np.uint8)
-        ok_ = np.isfinite(disp_f) & np.isfinite(Vf_).all(1) & np.isfinite(Vl_).all(1)
-        okc = ok_ & built_f
-        # NEW GROUND APART (otherwise every kind reads "stays built-up" and new construction has no
-        # kind of its own): ground read built in the last year but not built-up or road in the first is
-        # grouped on its own, so new construction gets kinds of its own (numbered first), and the ground
-        # already built gets the rest. New ground's share of the kinds follows its share of what moved,
-        # at least 2 when it has 100 moved cells, and the built ground keeps at least 2 too
-        new_f = (lc_f1 >= 0) & np.isin(lc_f1, BUILT_LC) & (lc_f0 >= 0) & ~np.isin(lc_f0, NEW_FROM)
-        kn = 0
-        if KINDS_ON and okc.sum() >= 50 * KINDS_K:
-            D = np.nan_to_num(Vl_ - Vf_)
-            D -= D[ok_].mean(0)  # the change the whole view made
-            mv = np.flatnonzero(okc & (disp_f >= float(np.quantile(disp_f[okc], 1 - KINDS_TOP))))
-            X = D[mv] / np.maximum(np.linalg.norm(D[mv], axis=1), 1e-9)[:, None]
-            isn = new_f[mv]
-            nn, no = int(isn.sum()), int((~isn).sum())
-            if nn >= 50:
-                kn = max(2 if nn >= 100 else 1, round(KINDS_K * nn / len(mv)))
-                kn = min(kn, KINDS_K - (2 if no >= 100 else 1 if no >= 50 else 0))
-            ko = KINDS_K - kn if no >= 50 else 0
-            if kn:
-                kind_f[mv[isn]] = _kinds(X[isn], kn, seed=nn) + 1
-            if ko:
-                kind_f[mv[~isn]] = _kinds(X[~isn], ko, seed=no) + 1 + kn
-
-        # the peak: per hexagon, its finer cell with the biggest change (built ones first)
-        dkey = np.where(np.isnan(disp_f), -np.inf, disp_f) + np.where(built_f, 10.0, 0.0)
-        o = np.lexsort((-dkey, par))
-        ps = par[o]
-        first = np.r_[True, ps[1:] != ps[:-1]] if len(ps) else np.zeros(0, bool)
-        pk = o[first]
-        nkids = np.diff(np.r_[np.flatnonzero(first), len(ps)]).astype(np.int32)
-        disp, big, steps, rel = disp_f[pk], big[pk], steps[:, pk], rel[:, pk]
-        kind = kind_f[pk]
-        lcy = np.stack([(readers[y] or _none)(Vs[y][pk]) for y in lyears], 1) if n else np.zeros((0, len(lyears)), np.int64)
-        # the share of each hexagon's finer cells read as built (BUILT_LC) in the last year
-        bu_share = (np.bincount(np.searchsorted(cellid, par), weights=np.isin(lc_f1, BUILT_LC).astype(np.float64), minlength=n) / np.maximum(nkids, 1)) if n else np.zeros(0)
-        # drawn on built ground only: the peak reads built in the last year, and BUILT_SHARE of it does
-        built_h = (np.isin(lc_f1[pk], BUILT_LC) & (bu_share >= BUILT_SHARE)) if n else np.zeros(0, bool)
-
-        # the whole history: each hexagon's change peak, judged around its own
-        # change year
-        ccode = np.zeros(n, np.uint8)
-        cratio = np.full(n, np.nan, np.float32)
-        if hist and n:
-            ccode, cratio = _trajectory(Vs, hyears, hrel, pk, big)
-            hsteps_h, hrel_h = hsteps[:, pk], hrel[:, pk]
-            # the biggest step in the whole history, which may sit outside the window
-            hbig = np.where(np.isnan(hrel_h).all(0), -2, np.array([b for _, b in hstep_years])[np.argmax(np.nan_to_num(hrel_h, nan=-np.inf), 0)])
-        # the hexagon's biggest yearly step as a multiple of the usual step in
-        # view that year (the card)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            stand = np.nanmax(rel, axis=0) if rel.size else np.zeros(n, np.float32)
-        stand = np.where(np.isfinite(stand), stand, np.nan).astype(np.float32)
-
-        scored = ~np.isnan(disp)
-        if scored.sum() >= 2:
-            lo, hi = (float(q) for q in np.percentile(disp[scored], [2, 98]))
-            hi = hi if hi > lo else lo + 1e-6
-        else:
-            lo, hi = 0.0, 1.0
-        level = np.where(scored, np.clip((np.nan_to_num(disp) - lo) / (hi - lo), 0, 1), np.nan).astype(np.float32)
-
-        lc_model = {"classes": list(lc_n), "examples": list(lc_n.values()), "short": list(LC_VOCAB), "source": " and ".join(src)}
-
-        # each kind in a line, to help name it: its hexagons, their most common
-        # change year, and what AlphaEarth reads it as in the first and last
-        # year. (It was the WorldCover 2021 class it had most more of than the
-        # view: on a highway and building site that read "cropland", the
-        # ground from before the change.)
-        kinds = []
-        for kk in range(1, KINDS_K + 1):
-            m = kind == kk
-            yv = big[m][big[m] > 0]
-            q = {"n": int(m.sum()), "year": int(np.bincount(yv - 2000).argmax() + 2000) if len(yv) else None, "from": None, "to": None, "pair_share": None}
-            # what AlphaEarth reads its finer cells as, first year and last: the most common pair
-            mf = (kind_f == kk) & (lc_f0 >= 0) & (lc_f1 >= 0)
-            if mf.any():
-                pc = np.bincount(lc_f0[mf] * _NV + lc_f1[mf])
-                a_, b_ = divmod(int(pc.argmax()), _NV)
-                q["from"], q["to"], q["pair_share"] = LC_VOCAB[a_], LC_VOCAB[b_], float(pc.max() / mf.sum())
-            kinds.append(q)
-
-        cells = pa.table({
-            "cell": pa.array(cellid),
-            "earthwork": pa.array(earth),
-            "disp": pa.array(disp),
-            "level": pa.array(level),
-            "big_year": pa.array(big.astype(np.int16)),
-            "finer_cells": pa.array(nkids),
-            "stands_out": pa.array(stand),
-            "kind": pa.array(kind),
-            "change_history": pa.array([HIST_KIND.get(int(c_)) for c_ in ccode], pa.string()),
-            **{f"step_{b}": pa.array(steps[i]) for i, (_, b) in enumerate(step_years)},
-            **{f"rel_{b}": pa.array(rel[i]) for i, (_, b) in enumerate(step_years)},
-            **{f"reads_as_{y}": pa.array([LC_VOCAB[t] if t >= 0 else None for t in lcy[:, i]], pa.string()) for i, y in enumerate(lyears)},
-            "landcover": pa.array([_WC_NAME[WC_CODES[t]] if t >= 0 else None for t in top]),
-            "landcover_share": pa.array(top_share.astype(np.float32)),
-            **{f"wc_{_WC_NAME[c].replace(' ', '_')}": pa.array(share[:, i].astype(np.float32)) for i, c in enumerate(WC_CODES)},
-        })
+        nkids = np.bincount(hix, minlength=n).astype(np.int32)
+        scored = np.isfinite(earth)
+        cells = pa.table({"cell": pa.array(cellid), "earthwork": pa.array(earth), "finer_cells": pa.array(nkids)})
         return {
-            "cells": cells, "cellid": cellid, "res": res, "disp": disp, "level": level, "big": big, "earth": earth,
-            "steps": steps, "rel": rel, "med": med, "step_years": step_years, "years": years, "y0": y0, "y1": y1,
-            "shift_lo": lo, "shift_hi": hi, "share": share, "nwc": nwc, "top": top, "top_share": top_share,
-            "stand": stand, "kind": kind, "kinds": kinds, "lcy": lcy, "lyears": lyears, "lc_model": lc_model,
-            "hist": hist, "hyears": hyears, "ccode": ccode, "cratio": cratio, "built_only": built_only, "bu_share": bu_share, "built_h": built_h,
-            "hsteps": hsteps_h if hist and n else None, "hrel": hrel_h if hist and n else None,
-            "hstep_years": hstep_years if hist else None, "hbig": hbig if hist and n else None,
-            "score": f"AEF {years[0]} to {years[-1]}: {int(scored.sum()):,} of {n:,} cells scored, peak of {nfine:,} finer cells, median steps "
-                     + ", ".join(f"{b} {m:.3f}" for (_, b), m in zip(step_years, med))
-                     + ("" if not KINDS_ON else " | kinds of change: " + ", ".join(f"{j + 1}: {q['n']:,}" + (f" {q['from']} to {q['to']} {100 * q['pair_share']:.0f}%" if q["from"] else "") for j, q in enumerate(kinds)))
-                     + f" | land cover read from AlphaEarth, taught by {lc_model['source']}: " + (", ".join(f"{c} {k:,}" for c, k in zip(lc_model["classes"], lc_model["examples"])) or "nothing"),
+            "cells": cells, "cellid": cellid, "res": res, "earth": earth, "years": [y0, y1], "y0": y0, "y1": y1,
+            "score": f"Earthwork {y0} to {y1}: {int(scored.sum()):,} of {n:,} hexagons scored, peak of {nfine:,} finer cells",
         }
 
     return (build_frame,)
@@ -3216,6 +1554,12 @@ def _(anywidget, asyncio, time, traitlets):
         .at-fc .hex{border-top:0;margin-top:0;padding-top:0}
         .at-fc:not(.more) .hex>:not(.x):not(.place):not(h3:last-child):not(h4):not(p),.at-fc:not(.more) .hex>p.sub{display:none}
         .at-fc:not(.more) .hex h4{margin-top:2px}
+        .at-yc .hexwrap .hex{margin-top:10px}
+        .at-yc .hexwrap:not(.more) .hex>:not(.x):not(.place):not(h3:last-child):not(h4):not(p),.at-yc .hexwrap:not(.more) .hex>p.sub{display:none}
+        .at-yc .hexwrap:not(.more) .hex h4{margin-top:6px}
+        .at-yc .fcbar{display:flex;align-items:center;gap:10px;margin-top:4px;font-size:12px;color:var(--muted)}
+        .at-yc .fcbar button{font:inherit;font-size:12px;padding:2px 9px;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
+        .at-yc .fcbar button:hover{background:var(--sel)}
         .at-fc .fcbar{display:flex;align-items:center;gap:10px;margin-top:4px;font-size:12px;color:var(--muted)}
         .at-fc .fcbar button{font:inherit;font-size:12px;padding:2px 9px;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
         .at-fc .fcbar button:hover{background:var(--sel)}
@@ -3529,7 +1873,7 @@ def _(anywidget, asyncio, time, traitlets):
           tools.append(bPair, bMore, bFit);
           pane.appendChild(tools);
           const yc = el_("div", "at-yc at-glass");
-          // the hexagon's card, floating by the click (see renderFc)
+          // the old floating hexagon card: kept hidden (the hexagon drops down in the top right card)
           const fc = el_("div", "at-yc at-fc at-glass");
           pane.appendChild(yc);
           pane.appendChild(fc);
@@ -3857,11 +2201,23 @@ def _(anywidget, asyncio, time, traitlets):
                 : `<h4>Where it changed, by year</h4><p class="sub">Hexagons in view that changed a fair amount or more, by the year their change stood out most</p>`;
               h += yearBars(c);
             } else if (!(N && hattrs)) h += `<p class="sub" style="margin-top:12px">${map && map.getZoom() < HEXZ ? `Zoom in to ${HEXZ} for the hexagons.` : "Loading this view…"}</p>`;
+            // the clicked hexagon drops down inside this card (never floating over the map): compact, More
+            // for the whole account; a new pick opens the card if it was folded
+            const pc = cardData && cardData.kind ? cardData : null;
+            if (pc) {
+              if (pc.n !== fcFor) { fcFor = pc.n; fcMore = false; ycFolded = false; }
+              h += `<div class="hexwrap${fcMore ? " more" : ""}">` + hexSection(pc)
+                + `<div class="fcbar">${pc.kind === "note" ? "" : `<button class="fcmore">${fcMore ? "Less" : "More"}</button>`}<span><kbd>Esc</kbd> closes</span></div></div>`;
+            } else fcFor = null;
             yc.innerHTML = h;
-            renderFc();
+            fc.style.display = "none";
             yc.classList.toggle("collapsed", ycFolded);
             const cb = yc.querySelector(".yr .at-cb");
             if (cb) cb.onclick = (e) => { e.stopPropagation(); ycFolded = !ycFolded; keep("card", ycFolded); renderYear(); };
+            const hx = yc.querySelector(".hexwrap .x");
+            if (hx) hx.onclick = (e) => { e.stopPropagation(); closeCard(); };
+            const hm = yc.querySelector(".hexwrap .fcmore");
+            if (hm) hm.onclick = (e) => { e.stopPropagation(); fcMore = !fcMore; renderYear(); };
             fitCard();
           }
           // the card never scrolls: when its content is taller
@@ -3873,42 +2229,8 @@ def _(anywidget, asyncio, time, traitlets):
             const avail = pane.clientHeight - yc.offsetTop - 12, need = yc.offsetHeight;
             if (avail > 0 && need > avail) yc.style.transform = `scale(${avail / need})`;
           }
-          // THE HEXAGON'S CARD, FLOATING: compact (the place and the layer's headline) next to where the
-          // hexagon was clicked, More for the whole account, Esc or x to close. A card that arrives with no
-          // click just before it (a search) sits at the top right
-          let fcMore = false, fcFor = null, fcClick = null;
-          pane.addEventListener("pointerdown", (e) => { fcClick = {x: e.clientX, y: e.clientY, t: Date.now()}; }, true);
-          function renderFc() {
-            const c = cardData;
-            if (!c || !c.kind) { fc.style.display = "none"; fcFor = null; return; }
-            const fresh = c.n !== fcFor;
-            if (fresh) fcMore = false;
-            fc.innerHTML = hexSection(c) + `<div class="fcbar">${c.kind === "note" ? "" : `<button class="fcmore">${fcMore ? "Less" : "More"}</button>`}<span><kbd>Esc</kbd> closes</span></div>`;
-            fc.classList.toggle("more", fcMore);
-            fc.style.display = "block";
-            const x = fc.querySelector(".x");
-            if (x) x.onclick = (e) => { e.stopPropagation(); closeCard(); };
-            const m = fc.querySelector(".fcmore");
-            if (m) m.onclick = (e) => { e.stopPropagation(); fcMore = !fcMore; renderFc(); };
-            if (fresh) { fcFor = c.n; placeFc(); } else keepFcIn();
-          }
-          function placeFc() {
-            const r = pane.getBoundingClientRect(), w = fc.offsetWidth, h = fc.offsetHeight;
-            let x, y;
-            if (fcClick && Date.now() - fcClick.t < 15000) {
-              x = fcClick.x - r.left + 16; y = fcClick.y - r.top + 16;
-              if (x + w > r.width - 12) x = fcClick.x - r.left - w - 16;
-              if (y + h > r.height - 12) y = r.height - h - 12;
-            } else { x = r.width - w - 12; y = 60; }
-            fc.style.left = Math.max(12, x) + "px"; fc.style.top = Math.max(12, y) + "px";
-          }
-          // More makes it taller: kept inside the pane
-          function keepFcIn() {
-            const r = pane.getBoundingClientRect(), h = fc.offsetHeight, w = fc.offsetWidth;
-            const top = parseFloat(fc.style.top) || 12, left = parseFloat(fc.style.left) || 12;
-            if (top + h > r.height - 12) fc.style.top = Math.max(12, r.height - h - 12) + "px";
-            if (left + w > r.width - 12) fc.style.left = Math.max(12, r.width - w - 12) + "px";
-          }
+          // the hexagon's card lives in the top right card (renderYear); fc stays hidden
+          let fcMore = false, fcFor = null;
           for (const el of [yc, fc]) el.addEventListener("pointermove", (e) => {
             const t = e.target && e.target.getAttribute && e.target.getAttribute("data-tip");
             if (!t) { tip.style.display = "none"; return; }
@@ -4768,123 +3090,25 @@ def _(mo):
     mo.md("""
     ## How it works
 
-    **AlphaEarth, folded to H3.** Every 10 m pixel of the AlphaEarth
-    Foundations embedding is 64 numbers describing the ground for one year.
-    For the view on screen, the notebook reads each year in the window
-    (2023 to 2025 by default, 2017 to 2025 available) from Source
-    Cooperative: the COG overviews at coarser hexagons, the zarr mosaic
-    from res 11 in. Each pixel's lon/lat goes through an h3ronpy UDF inside
-    DataFusion (via xarray-sql), and the pixels are averaged per cell, one
-    fold per year. The hexagon size follows the zoom.
+    **One read per view.** AlphaEarth's first and last year of the window
+    are read for what is in view: an overview of the annual COGs zoomed out,
+    the 10 m mosaic from about zoom 13.2. Each pixel's lon/lat goes through
+    an h3ronpy UDF inside DataFusion (via xarray-sql) and the pixels are
+    averaged per cell, one level finer than the hexagons drawn.
 
-    **The brightest patch, not the average.** The fold runs one H3 level
-    finer than the hexagons on screen (res 9 cells under res 8 hexagons at
-    zoom 9), about one pixel of the read per finer cell. Everything below
-    is worked out per finer cell; then h3ronpy's `change_resolution` gives
-    each finer cell its parent hexagon, and each hexagon takes its
-    most-changed finer cell whole: its change, its year, its kind, its
-    steps. A small site that changed a lot inside a hexagon of quiet ground
-    keeps the hexagon lit instead of being averaged away.
+    **The score.** Each finer cell's two vectors, made unit length (b the
+    first year, a the last), go into `models/earthwork-lr.npz`: a logistic
+    regression on [b, a, a * b, (a - b)^2], 256 numbers. See
+    `earthwork_model.py` for how it was taught and how well it does on
+    ground it never saw.
 
-    **How far it moved.** Each finer cell's vector is normalized every
-    year, and `disp` is 1 minus the cosine between the first and last year
-    read: 0 means the numbers did not move. AEF Change (`S`) colors
-    hexagons by `disp` in viridis, stretched to this view's 2nd to 98th
-    percentile, so the colors rank hexagons against their neighbors, not
-    the world. Ground that barely moved is drawn faint.
+    **The brightest patch, not the average.** Each hexagon takes its
+    highest-scoring finer cell, so a small dig inside a hexagon of quiet
+    ground keeps the hexagon lit.
 
-    **On built ground only.** AEF Change draws a hexagon only when its peak
-    reads built (built-up, road or construction) in the last year read and
-    at least half of its finer cells do (`BUILT_SHARE`). The change itself
-    is AlphaEarth's alone; the land cover reader below decides only which
-    hexagons are drawn. Its teacher changes with the zoom: below zoom 11.8,
-    ESA WorldCover 2021 (the line under the buttons says so); from 11.8,
-    Impact Observatory and Overture, with WorldCover standing in until
-    Impact Observatory has been read. More in `docs/aef-change.md`.
-
-    **Kinds of change (turned off here, `KINDS_ON`).** For every finer cell, the change is its last
-    year's vector minus its first. The mean change over the whole view is
-    taken off first: the embeddings drift as a whole between years, and
-    without this every kind would lean the same way. The finer cells in the
-    top quarter of the view by `disp` are kept, their change directions
-    normalized, and grouped by spherical k-means into six kinds (k-means++
-    start, fit on a sample of 20,000, then every kept cell goes to its
-    nearest kind). Kinds are numbered largest first and drawn in the
-    Okabe-Ito colors, fuller the more the hexagon moved; hexagons in no
-    kind are faint gray. The grouping needs at least 300 moved cells. Since
-    the kinds are the view's own, kind 1 here is not kind 1 in the next
-    view, and hiding a kind lasts until the view changes.
-
-    Zoomed out the groups change a lot from one zoom to the next, so Kinds
-    of change is drawn only from hexagon res 10 (zoom 11.8, `KINDS_MIN_RES`
-    in the constants), and only once the land cover below has been read
-    for the view. Until then the map is AEF Change, its button is
-    grayed, and a line under it gives the zoom it appears at and the zoom
-    now. When it is ready the button flashes and keeps a small blue dot;
-    the map does not switch by itself, its button does. Zooming back out returns
-    to AEF Change.
-
-    **The land cover, read from AlphaEarth every year.** To name a kind,
-    the notebook learns in each view what the land cover looks like in
-    AlphaEarth, year by year: a logistic regression per year on the 64
-    numbers, one class per finer cell, among trees, grass, cropland,
-    built-up, bare, water, wetland, road and construction. The teachers,
-    per finer cell:
-
-    - Impact Observatory's annual land cover (10 m, 2017 to 2023, on
-      Planetary Computer) teaches its own year on all ground. 2024 and 2025
-      have no map, so the nearest year's map teaches only ground that
-      barely moved (at or under the view's median `disp`).
-    - Overture roads and rail (major roads by width), read from Overture's
-      own PMTiles (the vector tiles under the view, a few MB), make a cell a road;
-      its land use makes construction sites, quarries and landfill
-      "construction", and residential and industrial land "built-up".
-      Overture describes today, so it teaches the last year on all ground
-      and earlier years only on ground that barely moved.
-    - ESA WorldCover 2021 stands in, on hexagons that are mostly one class,
-      until Impact Observatory has been read.
-
-    A cell teaches only when 70% of it is one class, and a class needs 30
-    examples to be learned. The teachers are read only from zoom 11.8.
-    When AlphaEarth has to be downloaded for a view, they are read at the
-    same time (they are small next to it), so Kinds of change is ready with
-    the hexagons; when AlphaEarth is already in memory, the hexagons come
-    at once and the land cover a few seconds after. The key gives each kind's most
-    common pair of first- and last-year readings and its share. The model
-    can only name the classes it saw in the view; the card lists them.
-
-    **The change year.** Every year-to-year step is scored the same way
-    (1 minus the cosine). Because of the drift between years (over Lagos
-    the 2024 to 2025 median step is about twice the others) each step is
-    divided by that year's median step in view, and the change year is the
-    step that stands out most. The key gives each kind's most common
-    change year; the card shows a clicked hexagon's steps against 1.
-
-    **The whole history, zoomed in.** From about zoom 13.2 (res 11, where
-    the full mosaic is read and a view is small) every AlphaEarth year from
-    2017 to 2025 is read in the background once the window's hexagons are
-    up. The card then says what the ground did around its change year: one
-    step that held, came back (by the last year closer to the ground before
-    than to the change year), changes this much most years (the step is
-    under twice the cell's own median step), kept moving after, or too
-    recent to tell. It describes; nothing is hidden because of it.
-
-    **What is there (ESA WorldCover 2021).** The same fold on ESA's class
-    raster: a count of pixels per class per hexagon, shown as shares on the
-    card. It is one year only, so it describes the ground and dates
-    nothing.
-
-    **What happened (Sentinel-2).** Holding space swaps the hexagons for
-    Earth Genome's yearly true-color mosaic, 2022 to 2025 (found through
-    their STAC, holes filled from the temporal mosaic), so what a kind
-    points to can be checked by eye. Nothing colored is drawn over it,
-    only the outlines of the hovered, picked and searched hexagons.
-
-    **Drawn as tiles.** The hexagons reach the browser as map tiles in
-    which each pixel names the hexagons near it. The shader draws each
-    hexagon's edge from its H3 boundary (h3-js), so edges stay smooth at
-    any zoom. Colors come from a small table, so switching modes or hiding
-    a kind recolors without new tiles.
+    **Drawn as tiles.** The hexagons reach the browser as tiles of cell
+    numbers, colored there from one byte per hexagon, so changing nothing
+    but the view never reruns the kernel's work.
     """)
     return
 
@@ -4901,7 +3125,6 @@ def _(
     HOLD_MS,
     HOLD_SLOP_PX,
     HOME,
-    KINDS_MIN_ZOOM,
     LABELS_SLOT,
     BASE_RES,
     MAX_RES,
@@ -4909,7 +3132,6 @@ def _(
     PER_RES,
     ZOOM0,
     OV_DIV_PM,
-    OV_RELEASE,
     RASTER_TILE,
     S2_SCALE0,
     S2_TILE_MIN_Z,
@@ -4917,7 +3139,6 @@ def _(
     S2_YEARS,
     VIEW_H,
     VIRIDIS,
-    WC_CLASSES,
     json,
     mo,
 ):
@@ -4932,13 +3153,9 @@ def _(
         "height": VIEW_H, "home": dict(HOME), "labels_slot": LABELS_SLOT, "tile": RASTER_TILE,
         "s2_year": S2_YEAR0, "s2_scale": S2_SCALE0, "s2_gen": 0, "s2_years": list(S2_YEARS), "s2_min_z": S2_TILE_MIN_Z,
         "aef_from": AEF_FROM0, "aef_to": AEF_TO0, "aef_years": list(AEF_YEARS_ALL),
-        "hex_zoom": HEX_ZOOM, "kinds_zoom": KINDS_MIN_ZOOM, "div_pm": OV_DIV_PM, "fit": _fit, "hold_ms": HOLD_MS, "hold_slop": HOLD_SLOP_PX,
+        "hex_zoom": HEX_ZOOM, "div_pm": OV_DIV_PM, "fit": _fit, "hold_ms": HOLD_MS, "hold_slop": HOLD_SLOP_PX,
         "viridis": VIRIDIS, "alpha_fill": ALPHA_FILL, "alpha_quiet": ALPHA_QUIET,
         "res_ladder": [ZOOM0, PER_RES, BASE_RES, MAX_RES],
-        "otf_zoom": 13.0,
-        # the shared models off for now: Color by is Earthwork and AEF Change, nothing runs
-        # the models (True brings back All built, Structure reading and First year built)
-        "models": False,
         # true color read and drawn in the browser (deck.gl-raster); False: the kernel's PNG tiles
         "s2_gpu": True,
     }))
@@ -4946,7 +3163,7 @@ def _(
         "frame": None, "sent": None, "box": None, "res": None, "vs": None,
         "busy": False, "pending": None, "pending_force": False, "task": None, "loop": None,
         "s2scale": S2_SCALE0, "s2gen": 0, "y0": AEF_FROM0, "y1": AEF_TO0,
-        "hit": None, "pick_n": None, "card": None, "memo": {}, "aef": {}, "wc": {}, "io": {}, "ov": {},
+        "hit": None, "pick_n": None, "card": None, "memo": {}, "aef": {},
         "h_cam": None, "h_ctl": None, "h_pick": None, "runs": 0, "hex_status": "", "place": None,
     }
     cmap
@@ -4961,31 +3178,10 @@ def _(
     HEX_TILE_PX,
     HEX_UP,
     HEX_ZOOM,
-    HIST_MIN_RES,
     HOLD,
-    IO_YEARS,
     HOME,
-    KINDS_MIN_RES,
-    LC_VOCAB,
     SETTLE,
-    WC_CLASSES,
-    WC_CODES,
     aef_fold,
-    io_fold,
-    ov_fold,
-    MOSAIC_MIN_RES,
-    BASE_RES,
-    PER_RES,
-    ZOOM0,
-    box_km2,
-    OTF_CLASSES,
-    OTF_GROUND,
-    STORE,
-    otf_card,
-    otf_covered,
-    otf_on_frame,
-    otf_run,
-    wsf_label,
     asyncio,
     build_frame,
     cmap,
@@ -5006,7 +3202,6 @@ def _(
     time,
     traceback,
     view_to_bbox,
-    wc_fold,
     zlib,
 ):
     # ---- wiring: the camera loop, the click and the controls. Re-runs freely. -----
@@ -5017,7 +3212,6 @@ def _(
     HOLD["runs"] += 1
     # one frame build at a time: they share the DuckDB connection's registered tables
     HOLD.setdefault("build_lock", asyncio.Lock())
-    _WC_NAME = dict(WC_CLASSES)
 
     def _hex_tile(fr, z, x, y):
         """A map tile of the frame's hexagons as cell numbers: HEX_TILE_PX a
@@ -5038,64 +3232,6 @@ def _(
             return None
         return zlib.compress(np.where(hit, i + 1, 0).astype("<u4").tobytes(), 1)
 
-    def _otf_tile(z, x, y):
-        """A map tile of the model's res 13 cells (res 12 under zoom 14), straight
-        from the store (as segments-map draws its res 13): the tile's own cells and 8 bytes each
-        (class + 1, built share, building share, structure %, ground code, first
-        year built - 2000, coverage, 0), then each pixel's 1-based local cell,
-        deflated. Only the cells in this tile cross, however many the view holds."""
-        f = STORE["fixed"]
-        if f is None or not STORE["years"]:
-            return None
-        T, n = HEX_TILE_PX, 2 ** z
-        fr_ = (np.arange(T) + 0.5) / T
-        lon = (x + fr_) / n * 360.0 - 180.0
-        lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + fr_) / n))))
-        LON, LAT = np.meshgrid(lon, lat)
-        if z < 15:
-            # coarser under map zoom 14 (tile zoom 15: the 256 px tiles sit a zoom above the
-            # map's 512 px ones): res 12 at tile zoom 14, res 11 below, where a res 13 hexagon is
-            # a screen pixel or less and a whole tile of them passes the 65,535 a tile can index.
-            # Each coarser cell is the group-by of its res 13 rows, as the frame's hexagons are
-            r_ = 12 if z == 14 else 11
-            c = pa.array(coordinates_to_cells(LAT.ravel(), LON.ravel(), r_)).to_numpy(zero_copy_only=False).astype(np.uint64)
-            u, inv = np.unique(c, return_inverse=True)
-            at = otf_on_frame(u, r_, sorted(STORE["years"]))
-            if at is None:
-                return None
-            keep = at[:, 6] > 0
-            if not keep.any():
-                return None
-            new = np.cumsum(keep).astype(np.uint32)
-            idx = np.where(keep[inv], new[inv], 0).astype(np.uint32)
-            attrs = np.hstack([at[keep], np.zeros((int(keep.sum()), 1), np.uint8)]).astype(np.uint8)
-            head = np.array([int(keep.sum())], "<u4").tobytes()
-            return zlib.compress(head + u[keep].astype("<u8").tobytes() + attrs.tobytes() + idx.astype("<u4").tobytes(), 1)
-        c = pa.array(coordinates_to_cells(LAT.ravel(), LON.ravel(), 13)).to_numpy(zero_copy_only=False).astype(np.uint64)
-        cells = f["cell"]
-        i = np.clip(np.searchsorted(cells, c), 0, len(cells) - 1)
-        hit = cells[i] == c
-        if not hit.any():
-            return None
-        u, inv = np.unique(i[hit], return_inverse=True)
-        if len(u) > 65535:
-            return None
-        idx = np.zeros(T * T, np.uint32)
-        idx[hit] = inv + 1
-        ys = sorted(STORE["years"])
-        last = STORE["years"][ys[-1]]
-        P = last["P"][u].astype(np.int32)
-        cls = np.where(P.sum(1) > 0, P.argmax(1) + 1, 0)
-        built = P[:, [4, 5, 6]].sum(1)
-        first = np.zeros(len(u), np.int32)
-        for y_ in ys:
-            Py = STORE["years"][y_]["P"][u].astype(np.int32)
-            first = np.where((first == 0) & (Py[:, [4, 5, 6]].sum(1) >= 128), y_ - 2000, first)
-        attrs = np.stack([cls, np.clip(built, 0, 255), P[:, 6], last["s"][u], last["c"][u], first,
-                          np.full(len(u), 255), np.zeros(len(u), np.int32)], 1).astype(np.uint8)
-        head = np.array([len(u)], "<u4").tobytes()
-        return zlib.compress(head + cells[u].astype("<u8").tobytes() + attrs.tobytes() + idx.astype("<u4").tobytes(), 1)
-
     async def _tile_fn(src, z, x, y, year):
         t0 = time.time()
         if src == "hex":
@@ -5113,8 +3249,6 @@ def _(
             out = await cpu(_job)
             cmap.tile_times[(src, z, x, y, year)] = {"wait": 1e3 * (ts["s"] - t0), "run": 1e3 * (ts["e"] - ts["s"])}
             return out
-        elif src == "otf13":
-            out = await cpu(_otf_tile, z, x, y)
         elif src == "s2i":
             out = await s2_items_json(z, x, y, year)
         else:
@@ -5161,57 +3295,22 @@ def _(
 
     # ---- the hexagons -------------------------------------------------------------
     def _paint():
-        """Send the frame once: 9 bytes per hexagon, colored in the browser."""
+        """Send the frame once: 17 bytes per hexagon, the layout the browser reads. Only two are used
+        here: the 2nd (AlphaEarth here: nonzero) and the 17th (Earthwork 1..255, 0 none); the 9th is 1
+        (drawn). Colored in the browser."""
         fr = HOLD["frame"]
         if fr is None or HOLD["sent"] is fr:
             return
-        big, lv = fr["big"], fr["level"]
-        yc = np.where(big > 0, big - 2000, 0).astype(np.uint8)
-        lb = np.where(np.isnan(lv), 0, 1 + np.round(254 * np.nan_to_num(lv))).astype(np.uint8)
-        tc = np.where(fr["top"] >= 0, fr["top"] + 1, 0).astype(np.uint8)
-        ts = np.round(255 * np.clip(fr["top_share"], 0, 1)).astype(np.uint8)
-        # the whole history, when read: the change peak's code (0 not read,
-        # see _trajectory)
-        ch = fr["ccode"].astype(np.uint8)
-        # the biggest yearly step as a multiple of the usual, in tenths (0 none)
-        sb = np.round(10 * np.clip(np.nan_to_num(fr["stand"]), 0, 25.5)).astype(np.uint8)
-        # what AlphaEarth reads it as over the years (lcy): 0 no reading, 1 the
-        # same class every year, 2 the class changed, 3 changed and built-up,
-        # road or construction in some year (the key's All / Built)
-        lcy = fr.get("lcy")
-        lc = np.zeros(len(big), np.uint8)
-        if lcy is not None and len(lcy) == len(big) and lcy.shape[1]:
-            ok = lcy >= 0
-            same = np.where(ok, lcy, 99).min(1) == np.where(ok, lcy, -1).max(1)
-            built = np.isin(lcy, [LC_VOCAB.index(c) for c in ("built-up", "road", "construction")]).any(1)
-            lc = np.where(~ok.any(1), 0, np.where(same, 1, np.where(built, 3, 2))).astype(np.uint8)
-        # 1 when drawn on built ground (see BUILT_SHARE); every hexagon when the frame is not built only
-        bh = fr.get("built_h")
-        bt = (bh.astype(np.uint8) if bh is not None and len(bh) == len(big) and fr.get("built_only") else np.ones(len(big), np.uint8))
-        # the shared models' answers kept in res 13 (see otf_run), as 7 more bytes per hexagon:
-        # All built class + 1, built share, building share, structure %, ground code, first
-        # year built - 2000, coverage (0 where the model has not run here)
-        om = otf_on_frame(fr["cellid"], HOLD["res"], list(range(int(fr["years"][0]), int(fr["years"][-1]) + 1)))
-        if om is None or len(om) != len(big):
-            om = np.zeros((len(big), 7), np.uint8)
+        ew = fr["earth"]
+        eb = np.where(np.isnan(ew), 0, 1 + np.round(254 * np.nan_to_num(ew))).astype(np.uint8)
+        at = np.zeros((len(ew), 17), np.uint8)
+        at[:, 1], at[:, 8], at[:, 16] = eb, 1, eb
         with cmap.hold_sync():
             cmap.cells = fr["cellid"].astype("<u8").tobytes()
-            # the 17th byte: earthwork 1..255 (0 none)
-            ew = fr.get("earth")
-            eb = (np.where(np.isnan(ew), 0, 1 + np.round(254 * np.nan_to_num(ew))).astype(np.uint8)
-                  if ew is not None and len(ew) == len(big) else np.zeros(len(big), np.uint8))
-            cmap.hattrs = np.ascontiguousarray(np.column_stack([np.stack([yc, lb, tc, ts, ch, sb, fr["kind"].astype(np.uint8), lc, bt], 1), om, eb])).tobytes()
+            cmap.hattrs = at.tobytes()
             cmap.hmeta = json.dumps({
-                "y0": int(fr["years"][0]), "y1": int(fr["years"][-1]), "km2": float(CELL_KM2.get(HOLD["res"], 0)),
+                "y0": int(fr["y0"]), "y1": int(fr["y1"]), "km2": float(CELL_KM2.get(HOLD["res"], 0)),
                 "seq": int(fr.get("seq", 0)), "carry": CARRY_RES, "timing": fr.get("timing"),
-                "classes": [_WC_NAME[c] for c in WC_CODES],
-                "hist": [int(fr["hyears"][0]), int(fr["hyears"][-1])] if fr.get("hist") else None,
-                "hist_pending": bool(fr.get("hist_pending")),
-                "kinds": fr.get("kinds"), "lc_source": (fr.get("lc_model") or {}).get("source"),
-                "kinds_ready": bool(fr.get("kinds_ready")),
-                "otf": HOLD.get("otf_info"), "otf_pending": bool(HOLD.get("otf_pending")), "otf_zoom": round(ZOOM_MOSAIC, 1),
-                "otf_ver": int(STORE["ver"]),
-                "otf_classes": OTF_CLASSES, "otf_ground": OTF_GROUND,
             })
         HOLD["sent"] = fr
 
@@ -5231,182 +3330,6 @@ def _(
                 break
             if k[1] != bkey:
                 held -= size(HOLD["aef"].pop(k))
-        for k_ in ("wc", "io", "ov"):
-            while len(HOLD[k_]) > 40:
-                HOLD[k_].pop(next(iter(HOLD[k_])))
-
-    def _teach(bkey):
-        # the land cover teachers read for this box (see LC_* in the constants)
-        return {"io": {y: HOLD["io"][(y, bkey)][0] for y in IO_YEARS if (y, bkey) in HOLD["io"] and HOLD["io"][(y, bkey)][0] is not None},
-                "ov": (HOLD["ov"].get(bkey) or (None, ""))[0]}
-
-    def _teach_need(bkey, years):
-        # the land cover teachers' reads (Impact Observatory, Overture): NONE in this notebook. Earthwork does
-        # not use them; they stay in on_the_fly.py. AEF Change's built ground reads from the WorldCover stand-in
-        return [], False
-
-    def _teach_start(bkey, box, fres, years):
-        """The teachers' reads for these years, started now unless already in
-        flight, each kept in HOLD when it lands. The hexagons never wait on
-        them; Kinds of change follows."""
-        fly = HOLD.setdefault("teach_fly", {})
-        ineed, oneed = _teach_need(bkey, years)
-
-        async def _one(k, coro):
-            r = await coro
-            if k[0] == "ov":
-                HOLD["ov"][bkey] = r
-            else:
-                HOLD["io"][(k[1], bkey)] = r
-            return r
-
-        futs = []
-        for k, mk in ([(("ov", bkey), lambda: ov_fold(box, fres))] if oneed else []) + [
-                (("io", y, bkey), (lambda y=y: io_fold(box, fres, y))) for y in ineed]:
-            f = fly.get(k)
-            if f is None or f.cancelled() or (f.done() and f.exception() is not None):
-                f = fly[k] = asyncio.ensure_future(_one(k, mk()))
-                f.add_done_callback(lambda f_, k=k: fly.pop(k, None) if fly.get(k) is f_ else None)
-            futs.append(f)
-        return futs
-
-    def _later(fr0, key, box, res, rres, fres, stats, hist):
-        """WHAT COMES WHEN READY: the window's frame is already on the map. In the background:
-        the land cover teachers (Impact Observatory, Overture: slow, 20 to 40 s
-        at zoom 10.5) and, zoomed in, the other AlphaEarth years. After each
-        arrives the frame is built again with everything read so far (same
-        cells, same model, same seq, so the browser recolors and keeps its
-        tiles) and replaces it if it is still the one showing. A new view
-        cancels it."""
-        y0, y1 = key[0], key[1]
-        bkey = (res, key[3])
-        seq = fr0.get("seq")
-
-        async def _teachers():
-            # the reads _serve_hex started with AlphaEarth, or new ones;
-            # shielded, so a new view cancels the wait but not the reads
-            # (the next view over this ground may share them)
-            await asyncio.gather(*map(asyncio.shield, _teach_start(bkey, box, fres, list(range(y0, y1 + 1)) + (list(IO_YEARS) if hist else []))))
-            return "land cover teachers: " + " | ".join(
-                [(HOLD["ov"].get(bkey) or (None, ""))[1]] + [HOLD["io"][(y, bkey)][1] for y in IO_YEARS if (y, bkey) in HOLD["io"]])
-
-        async def _history():
-            need = [y for y in AEF_YEARS_ALL if (y, bkey) not in HOLD["aef"]]
-            got = await asyncio.gather(*(aef_fold(box, fres, y, read_res=rres) for y in need))
-            for y, r in zip(need, got):
-                HOLD["aef"][(y, bkey)] = r
-            _trim(bkey)
-            return f"history {AEF_YEARS_ALL[0]} to {AEF_YEARS_ALL[-1]} read"
-
-        async def _rebuild(what, t0):
-            cur = HOLD["frame"]
-            if cur is None or cur.get("seq") != seq:
-                return
-            hh = hist and all((y, bkey) in HOLD["aef"] for y in AEF_YEARS_ALL)
-            ayears = AEF_YEARS_ALL if hh else range(y0, y1 + 1)
-            aef_by_year = {y: HOLD["aef"][(y, bkey)][0] for y in ayears if (y, bkey) in HOLD["aef"]}
-            wc = HOLD["wc"].get(bkey)
-            if any(y not in aef_by_year for y in range(y0, y1 + 1)) or wc is None:
-                return
-            t1 = time.time()
-            async with HOLD["build_lock"]:
-                fr = await cpu(build_frame, aef_by_year, wc[0], y0, y1, res, hh, _teach(bkey))
-            cur = HOLD["frame"]
-            if fr is None or cur is None or cur.get("seq") != seq or len(fr["cellid"]) != len(cur["cellid"]):
-                return
-            ineed, oneed = _teach_need(bkey, range(y0, y1 + 1)) if res >= KINDS_MIN_RES else ([], False)
-            fr["seq"] = seq
-            fr["hist_pending"] = hist and not fr.get("hist")
-            fr["teach_pending"] = bool(ineed or oneed)
-            fr["kinds_ready"] = res >= KINDS_MIN_RES and not fr["teach_pending"]
-            fr["timing"] = {**(fr0.get("timing") or {}), "later": 1e3 * (t1 - t0), "t_frame": time.time()}
-            HOLD["memo"][key] = (fr, stats)
-            HOLD["frame"] = fr
-            _paint()
-            HOLD["hex_status"] = HOLD["hex_ready"] = (
-                f"hexagons: {stats} | {what} in {t1 - t0:.1f} s, frame again {time.time() - t1:.1f} s | {fr['score']}"
-                + (f" | reading AlphaEarth {AEF_YEARS_ALL[0]} to {AEF_YEARS_ALL[-1]}, the whole history…" if fr["hist_pending"] else "")
-                + (" | reading Impact Observatory and Overture…" if fr["teach_pending"] else ""))
-            _say(HOLD["hex_status"])
-            if HOLD.get("card_pick"):
-                _card_send(HOLD["card_pick"])
-
-        async def _run():
-            t0 = time.time()
-            jobs = []
-            ineed, oneed = _teach_need(bkey, range(y0, y1 + 1)) if res >= KINDS_MIN_RES else ([], False)
-            if ineed or oneed:
-                jobs.append(asyncio.ensure_future(_teachers()))
-            if hist and not fr0.get("hist"):
-                jobs.append(asyncio.ensure_future(_history()))
-            try:
-                for fut in asyncio.as_completed(jobs):
-                    what = await fut
-                    await _rebuild(what, t0)
-            except asyncio.CancelledError:
-                for j in jobs:
-                    j.cancel()
-                raise
-            except Exception as exc:
-                tb = traceback.extract_tb(exc.__traceback__)
-                _say(f"reading later failed: {type(exc).__name__}: {exc}" + (f" (line {tb[-1].lineno})" if tb else ""))
-
-        HOLD["hist_task"] = (key, _spawn(_run()))
-
-    # THE MODEL, PER PIXEL, from the 10 m read (read res MOSAIC_MIN_RES, about zoom 13.2): run
-    # in the background over the view once its frame is up, into the session store (otf_run);
-    # the frame is painted again from the store when it lands. A view the store already holds
-    # (these years, this ground) is not run again. The view is capped at _OTF_KM2 around its
-    # center (a wide screen at zoom 13.2 is a few hundred km2).
-    _OTF_KM2 = 300.0
-    # the model runs from zoom 13 (the frame's own 10 m read starts a little later, at 13.2;
-    # the model reads its 10 m window itself)
-    ZOOM_MOSAIC = 13.0
-
-    def _otf_box(view):
-        W_, S_, E_, N_ = view
-        a = box_km2(view)
-        if a <= _OTF_KM2:
-            return view
-        f = (_OTF_KM2 / a) ** 0.5
-        cx, cy, hx, hy = (W_ + E_) / 2, (S_ + N_) / 2, (E_ - W_) * f / 2, (N_ - S_) * f / 2
-        return (cx - hx, cy - hy, cx + hx, cy + hy)
-
-    def _otf_start(view, years):
-        if not json.loads(cmap.config or "{}").get("models"):
-            return
-        ob = _otf_box(view)
-        if otf_covered(ob, years):
-            return
-        ot = HOLD.get("otf_task")
-        if ot is not None and ot[1] is not None and not ot[1].done():
-            b = ot[0]
-            if b[0] <= ob[0] and b[1] <= ob[1] and b[2] >= ob[2] and b[3] >= ob[3]:
-                return
-            ot[1].cancel()
-
-        async def _run():
-            HOLD["otf_pending"] = True
-            HOLD["sent"] = None
-            _paint()
-            try:
-                info = await otf_run(ob, years, say=lambda m: _say(m + (" | " + HOLD["hex_status"] if HOLD.get("hex_status") else "")))
-                if info is not None:
-                    HOLD["otf_info"] = info
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                tb = traceback.extract_tb(exc.__traceback__)
-                _say(f"the model failed: {type(exc).__name__}: {exc}" + (f" (line {tb[-1].lineno})" if tb else ""))
-            finally:
-                HOLD["otf_pending"] = False
-            HOLD["sent"] = None
-            _paint()
-            if HOLD.get("card_pick"):
-                _card_send(HOLD["card_pick"])
-            _say(HOLD.get("hex_status") or "")
-
-        HOLD["otf_task"] = (ob, _spawn(_run()))
 
     async def _serve_hex(vsd, force=False):
         view = view_to_bbox(vsd)
@@ -5415,9 +3338,6 @@ def _(
         if (fr0 is not None and HOLD["box"] is not None and contains(HOLD["box"], view) and not force
                 and min(15, res_for_view(vsd, box) + HEX_UP) <= HOLD["res"] and (fr0["y0"], fr0["y1"]) == (HOLD["y0"], HOLD["y1"])):
             HOLD["hex_status"] = HOLD.get("hex_ready") or HOLD["hex_status"]
-            # the same frame, but the model may not have run on this view yet (zoomed in past 13 within it)
-            if vsd["zoom"] >= ZOOM_MOSAIC:
-                _otf_start(view, list(range(HOLD["y0"], HOLD["y1"] + 1)))
             return
         rres = res_for_view(vsd, box)
         res = min(15, rres + HEX_UP)
@@ -5426,37 +3346,17 @@ def _(
         rbox = tuple(round(v, 3) for v in box)
         key = (y0, y1, res, rbox)
         t0 = time.time()
-        # Earthwork compares the window's two ends only: the whole history (AEF Change's, not drawn here)
-        # is never read
-        hist = False
-        ht = HOLD.get("hist_task")
-        if ht is not None and ht[0] != key and ht[1] is not None:
-            ht[1].cancel()
-        years = list(range(y0, y1 + 1))
-        _tn = _teach_need((res, rbox), years) if res >= KINDS_MIN_RES else ([], False)
-        HOLD["hex_status"] = (f"reading AlphaEarth {y0} to {y1}, ESA WorldCover"
-                              + (", Impact Observatory" if _tn[0] else "") + (", Overture" if _tn[1] else "") + "…")
+        # Earthwork compares the window's first and last year: only those two are read
+        years = [y0, y1]
+        HOLD["hex_status"] = f"reading AlphaEarth {y0} and {y1}…"
         _say(HOLD["hex_status"])
         if key in HOLD["memo"]:
             fr, stats = HOLD["memo"][key]
         else:
             bkey = (res, rbox)
             need = [y for y in years if (y, bkey) not in HOLD["aef"]]
-            wneed = bkey not in HOLD["wc"]
-            # the land cover teachers (Impact Observatory, Overture PMTiles)
-            # start with AlphaEarth but the hexagons do not wait on them: inside one
-            # gather, Impact Observatory's reads took 13 to 19 s against 5 s
-            # alone and held the hexagons (Wuhan, zoom 12.2). Kinds of change
-            # follows when they land (_later)
-            if res >= KINDS_MIN_RES:
-                _teach_start(bkey, box, fres, years)
-            got = await asyncio.gather(
-                wc_fold(box, res) if wneed else asyncio.sleep(0, result=HOLD["wc"].get(bkey)),
-                *(aef_fold(box, fres, y, read_res=rres) for y in need),
-            )
-            if wneed:
-                HOLD["wc"][bkey] = got[0]
-            for y, r in zip(need, got[1:]):
+            got = await asyncio.gather(*(aef_fold(box, fres, y, read_res=rres) for y in need))
+            for y, r in zip(need, got):
                 HOLD["aef"][(y, bkey)] = r
             _trim(bkey)
             # zoomed or moved on while these were read (a fast zoom in): they
@@ -5466,21 +3366,15 @@ def _(
                 pv = _vsd(pend)
                 if pv["zoom"] < HEX_ZOOM or min(15, res_for_view(pv, pad_box(view_to_bbox(pv))) + HEX_UP) != res or not contains(box, view_to_bbox(pv)):
                     return
-            wc, s_wc = HOLD["wc"][bkey]
             aef_by_year = {y: HOLD["aef"][(y, bkey)][0] for y in years if (y, bkey) in HOLD["aef"]}
             t1 = time.time()
-            teach = _teach(bkey)
             async with HOLD["build_lock"]:
-                fr = await cpu(build_frame, aef_by_year, wc, y0, y1, res, False, teach)
-            if fr is not None:
-                fr["timing"] = {
-                    "reads": 1e3 * (t1 - t0), "frame": 1e3 * (time.time() - t1),
-                    "aef": [HOLD["aef"][(y, bkey)][1] for y in years if (y, bkey) in HOLD["aef"]], "wc": s_wc,
-                    "t_frame": time.time(),
-                }
+                fr = await cpu(build_frame, aef_by_year, y0, y1, res)
             if fr is None:
-                HOLD["hex_status"] = f"hexagons: res {res}, AlphaEarth has fewer than two years here | " + " | ".join(HOLD["aef"][(y, bkey)][1] for y in years if (y, bkey) in HOLD["aef"])
+                HOLD["hex_status"] = f"hexagons: res {res}, AlphaEarth is missing {y0} or {y1} here | " + " | ".join(HOLD["aef"][(y, bkey)][1] for y in years if (y, bkey) in HOLD["aef"])
                 return
+            fr["timing"] = {"reads": 1e3 * (t1 - t0), "frame": 1e3 * (time.time() - t1),
+                            "aef": [HOLD["aef"][(y, bkey)][1] for y in years if (y, bkey) in HOLD["aef"]], "t_frame": time.time()}
             HOLD["fseq"] = HOLD.get("fseq", 0) + 1
             fr["seq"] = HOLD["fseq"]
             # each year's AlphaEarth read and fold, "c" where it came from memory
@@ -5492,32 +3386,19 @@ def _(
                 _rd.append(f"{y} c" if y not in need else f"{y} {m_.group(1)}+{m_.group(2)} s" if m_ else f"{y} ?")
             stats = (
                 f"read res {rres}, hexagons res {res}, peak of res {fres} | AEF read+fold {', '.join(_rd)} "
-                f"(all {t1 - t0:.1f} s) | {s_wc} | frame {time.time() - t1:.1f} s"
+                f"(all {t1 - t0:.1f} s) | frame {time.time() - t1:.1f} s"
             )
             HOLD["memo"][key] = (fr, stats)
             while len(HOLD["memo"]) > 4:
                 HOLD["memo"].pop(next(iter(HOLD["memo"])))
-        fr["hist_pending"] = hist and not fr.get("hist")
-        # the land cover teachers only where Kinds of change is shown (KINDS_MIN_RES)
-        _in, _on_ = _teach_need((res, rbox), years) if res >= KINDS_MIN_RES else ([], False)
-        fr["teach_pending"] = bool(_in or _on_)
-        fr["kinds_ready"] = res >= KINDS_MIN_RES and not fr["teach_pending"]
         HOLD["frame"], HOLD["box"], HOLD["res"] = fr, box, res
         _paint()
-        HOLD["hex_status"] = HOLD["hex_ready"] = (
-            f"hexagons: {stats} | {fr['score']} | {time.time() - t0:.1f} s"
-            + (f" | reading AlphaEarth {AEF_YEARS_ALL[0]} to {AEF_YEARS_ALL[-1]}, the whole history…" if fr["hist_pending"] else "")
-            + (" | reading Impact Observatory and Overture…" if fr["teach_pending"] else ""))
+        HOLD["hex_status"] = HOLD["hex_ready"] = f"hexagons: {stats} | {fr['score']} | {time.time() - t0:.1f} s"
         if HOLD.get("card_pick"):
             _card_send(HOLD["card_pick"])
-        ht = HOLD.get("hist_task")
-        if (fr["hist_pending"] or fr["teach_pending"]) and not (ht is not None and ht[0] == key and ht[1] is not None and not ht[1].done()):
-            _later(fr, key, box, res, rres, fres, stats, hist)
-        if vsd["zoom"] >= ZOOM_MOSAIC:
-            _otf_start(view, years)
 
     # READ AHEAD: from _AHEAD_ZOOM, still short of the
-    # hexagons, AlphaEarth and WorldCover for the box zoom HEX_ZOOM would read
+    # hexagons, AlphaEarth's two years for the box zoom HEX_ZOOM would read
     # here are read in the background. Crossing into the hexagons over the
     # same ground then only builds the frame; nearby, the COG bytes are kept
     # (_Kept) and the fold is quick. A new place cancels the fold, not the
@@ -5538,15 +3419,11 @@ def _(
             return
         if at is not None and not at[1].done():
             at[1].cancel()
-        need = [y for y in range(y0, y1 + 1) if (y, bkey) not in HOLD["aef"]]
-        wneed = bkey not in HOLD["wc"]
+        need = [y for y in (y0, y1) if (y, bkey) not in HOLD["aef"]]
 
         async def _run():
-            got = await asyncio.gather(wc_fold(box, res) if wneed else asyncio.sleep(0),
-                                       *(aef_fold(box, fres, y, read_res=rres) for y in need))
-            if wneed:
-                HOLD["wc"][bkey] = got[0]
-            for y, r in zip(need, got[1:]):
+            got = await asyncio.gather(*(aef_fold(box, fres, y, read_res=rres) for y in need))
+            for y, r in zip(need, got):
                 HOLD["aef"][(y, bkey)] = r
             _trim(bkey)
 
@@ -5624,34 +3501,9 @@ def _(
         i = int(np.searchsorted(ids, cell))
         if i >= len(ids) or ids[i] != cell:
             return {"kind": "note", "title": "That hexagon is not in the current view's frame."}
-        lv = float(fr["level"][i])
-        lc = []
-        if fr["nwc"][i] > 0:
-            sh = fr["share"][i]
-            lc = [[_WC_NAME[WC_CODES[k]], float(sh[k])] for k in np.argsort(-sh) if sh[k] >= 0.01][:5]
-        return {
-            "kind": "hex", "cell": cellh, "level": None if np.isnan(lv) else lv, "big": int(fr["big"][i]),
-            "stand": None if np.isnan(fr["stand"][i]) else float(fr["stand"][i]),
-            "kind_n": int(fr["kind"][i]), "kinds": fr.get("kinds"),
-            "y0": int(fr["years"][0]), "y1": int(fr["years"][-1]),
-            "steps": [None if np.isnan(v) else float(v) for v in fr["steps"][:, i]],
-            "rel": [None if np.isnan(v) else float(v) for v in fr["rel"][:, i]],
-            "step_years": [int(b) for _, b in fr["step_years"]],
-            "landcover": lc, "km2": float(CELL_KM2.get(HOLD["res"], 0)),
-            "reads": [[int(y), fr["lc_model"]["short"][t] if t >= 0 else None] for y, t in zip(fr["lyears"], fr["lcy"][i])] if fr["lc_model"]["classes"] else [],
-            "lc_classes": fr["lc_model"]["classes"], "lc_source": fr["lc_model"]["source"],
-            "otf": otf_card(cellh, HOLD["res"], list(range(int(fr["years"][0]), int(fr["years"][-1]) + 1))),
-            "otf_classes": OTF_CLASSES, "otf_ground": OTF_GROUND, "wsf_words": [wsf_label(k) for k in range(21)],
-            **({
-                "hist": [int(fr["hyears"][0]), int(fr["hyears"][-1])],
-                "ccode": int(fr["ccode"][i]),
-                "cratio": None if np.isnan(fr["cratio"][i]) else float(fr["cratio"][i]),
-                "steps": [None if np.isnan(v) else float(v) for v in fr["hsteps"][:, i]],
-                "rel": [None if np.isnan(v) else float(v) for v in fr["hrel"][:, i]],
-                "step_years": [int(b) for _, b in fr["hstep_years"]],
-                "hbig": int(fr["hbig"][i]),
-            } if fr.get("hist") else {}),
-        }
+        ew = float(fr["earth"][i])
+        return {"kind": "hex", "cell": cellh, "level": None if np.isnan(ew) else ew, "earth": None if np.isnan(ew) else ew,
+                "y0": int(fr["y0"]), "y1": int(fr["y1"]), "km2": float(CELL_KM2.get(HOLD["res"], 0))}
 
     def _card_send(p):
         card = _hex_card(p)
@@ -5785,19 +3637,9 @@ def _(mo):
     ## Under the map
 
     Press the button once the map has settled to query the current view's
-    hexagons with DuckDB, one row per hexagon, most moved first. Each row's
-    numbers are its most-changed finer cell's: `disp` (1 minus the cosine
-    between the first and last year read), `level` (the same, stretched to
-    this view's p2 to p98), `kind` (its kind of change, 0 in none),
-    `big_year` (the year whose step stands out most against that year's
-    median step in view, -2 no data), `stands_out` (that step over the
-    median), `finer_cells` (how many finer cells the hexagon holds),
-    `change_history` (zoomed in: held, came back, changes most years, kept
-    moving, too recent), one `step_YYYY` and one `rel_YYYY` (the step over
-    the year's median) per step, one `reads_as_YYYY` per year (the land
-    cover AlphaEarth reads it as), `landcover` and `landcover_share` (the
-    main ESA WorldCover 2021 class) and one `wc_` column per WorldCover
-    class.
+    hexagons with DuckDB, one row per hexagon, likeliest earthwork first:
+    `earthwork` (its highest-scoring finer cell's chance the ground moved)
+    and `finer_cells` (how many finer cells the hexagon holds).
     """)
     return
 
@@ -5815,7 +3657,7 @@ def _(HOLD, con, mo, tables_btn):
     con.register("view_cells", HOLD["frame"]["cells"])
     view_table = mo.sql(
         """
-        SELECT * FROM view_cells ORDER BY disp DESC NULLS LAST
+        SELECT * FROM view_cells ORDER BY earthwork DESC NULLS LAST
         """,
         engine=con,
     )
