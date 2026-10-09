@@ -1577,6 +1577,13 @@ def _(anywidget, asyncio, time, traitlets):
         .at-yc .yr.img .comps{grid-column:1/-1;margin:10px 0 6px}
         .at-yc .yr.img .help{grid-column:1/-1;padding:0}
         .at-yc.collapsed .yr.img .comps,.at-yc.collapsed .yr.img .help{display:none}
+        /* folded while the imagery shows: the size of the folded hint card (its padding, 120 px of text and
+           the arrow), the year over its colors */
+        .at-yc.collapsed.holding{width:auto}
+        .at-yc.collapsed .yr.img{grid-template-columns:auto auto;column-gap:16px;align-items:center}
+        .at-yc.collapsed .yr.img b{grid-column:1;grid-row:1;font-size:28px;line-height:1}
+        .at-yc.collapsed .yr.img .comp{grid-column:1;grid-row:2;padding:4px 0 0;font-weight:400}
+        .at-yc.collapsed .yr.img .at-cb{grid-column:2;grid-row:1/3;align-self:center;margin-top:0}
         .at-yc h4{margin:14px 0 2px;font-size:13.5px;font-weight:600}
         .at-yc .sub{color:var(--muted);font-size:12.5px;margin:0 0 6px}
         .at-yc .hex{border-top:1px solid var(--line);margin-top:12px;padding-top:12px;position:relative}
