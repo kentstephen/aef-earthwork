@@ -21,6 +21,11 @@ flights at every site. Storm sites and the other marshes only test it. (Burns an
 ways, which made the model busier on bare ground and a little worse at digging.) DEM differences and AlphaEarth features are cached
 in data/earthwork/.
 
+On the map (earthwork.py) the score is also gated by plain change: multiplied by clip((1 - cos(b, a) - 0.05)
+/ 0.10, 0, 1). The model reads each year's look as well as the change, and ground bare in both years (a
+graded pad here) reads as dug: open desert abroad, which barely changes, lit up wholesale without it. Held
+out, the gate costs no digging and quiets the desert (Cairo 50% to 4%, Sahara 51% to 2%).
+
 Run: uv run python earthwork_model.py   (a few minutes the first time)
 """
 
@@ -54,9 +59,10 @@ MIN_OVERLAP = 0.15  # share of the shared grid both flights cover
 # what the model is for: digging by people (site grading, pits, quarries). Only these sites teach it; the
 # rest (burns, storm coasts) test whether it stays quiet where the surface changed but nobody dug
 TEACH_KINDS = ("building", "mining")
-# ground nobody dug that looks a lot like digging to AlphaEarth (a burn scar): taught only as NOT digging, its
+# ground nobody dug that looks a lot like digging to AlphaEarth (a burn scar, bare desert sand): taught only as
+# NOT digging (dunes do move, so only their unchanged ground), its
 # unchanged pixels and none of its moved ones, so the model learns that look is not earthwork
-QUIET_KINDS = ("burn",)
+QUIET_KINDS = ("burn", "dunes")
 # and one coastal marsh, mostly open brackish water (inland ponds did not teach it tidal water); the other
 # marshes only test whether that carries
 QUIET_SITES = ("brazoria-tx",)
@@ -78,10 +84,14 @@ SITES = [
     ("lakewood-ranch-fl", "building", (-82.40, 27.42), "FL_Peninsular_FDEM_2018", "FL_ManateeCounty_B25"),
     ("huntsville-al", "building", (-86.80, 34.69), "AL_NorthAL_2019", "AL_11County_B23"),
     ("fishers-in", "building", (-85.95, 39.98), "IN_Central_Hamilton_2017", "IN_HamiltonCounty_A25"),
+    ("las-vegas-se-nv", "building", (-115.05, 36.00), "NV_Las_Vegas_Region_2016", "NV_ClarkCounty_B22"),
+    ("las-vegas-nw-nv", "building", (-115.33, 36.28), "NV_Las_Vegas_Region_2016", "NV_ClarkCounty_B22"),
+    ("lancaster-ca", "building", (-118.20, 34.75), "CA_LosAngeles_2016", "CA_LosAngeles_B23"),
     ("mountain-pass-ca", "mining", (-115.53, 35.48), "CA_MountainPass_2019", "CA_FEMAR9Southeast_D24"),
     ("four-corners-fl", "mining", (-82.10, 27.65), "FL_Peninsular_FDEM_2018", "FL_ManateeCounty_B25"),
     ("hibbing-mn", "mining", (-93.066, 47.448), "MN_LakeSuperior_2021", "MN_UpperMissRiver_B22"),
     ("mexico-beach-fl", "storm", (-85.394, 29.956), "FL_Lower_Choctawhatchee_2017", "FL_HurricaneMichael_2020"),
+    ("white-sands-nm", "dunes", (-106.28, 32.81), "NM_SouthEast_2018", "NM_WhiteSandsNM_2020"),
     ("brazoria-tx", "marsh", (-95.25, 29.07), "TX_CoastalRegion_2018", "TX_Houston_B24"),
     ("anahuac-tx", "marsh", (-94.45, 29.62), "TX_CoastalRegion_2018", "TX_Houston_B24"),
     ("myakka-fl", "marsh", (-82.25, 27.30), "FL_Peninsular_FDEM_2018", "FL_ManateeCounty_B25"),
