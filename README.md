@@ -1,5 +1,9 @@
 # aef-earthwork
 
+- `earthwork.py`: where the ground was dug, filled or graded, from AlphaEarth, by a model taught
+  where 3DEP lidar flew the same ground twice. A for the area scale (unusual for this area).
+  [![Open in molab](https://molab.marimo.io/molab-shield.svg)](https://molab.marimo.io/github/github.com/kentstephen/aef-earthwork/blob/main/earthwork.py)
+
 AlphaEarth Foundations (AEF) annual embeddings draped over elevation, to see how river
 corridors and watersheds change over time.
 

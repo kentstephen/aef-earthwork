@@ -1288,7 +1288,15 @@ def _(change_resolution, np, os, pa):
     # finer cell, so one dig is not averaged away by the quiet ground around it.
     # EARTHWORK: earthwork_model.py's logistic regression on [b, a, a * b, (a - b)^2], b and a the unit
     # AlphaEarth vectors of the window's first and last year
-    _ew = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "earthwork-lr.npz"))
+    # (from the repo on GitHub when the notebook runs without its folder, as in molab)
+    _ewp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "earthwork-lr.npz")
+    if os.path.exists(_ewp):
+        _ew = np.load(_ewp)
+    else:
+        import io as _io
+        import urllib.request as _ur
+        with _ur.urlopen("https://raw.githubusercontent.com/kentstephen/aef-earthwork/main/models/earthwork-lr.npz", timeout=60) as _r:
+            _ew = np.load(_io.BytesIO(_r.read()))
     EW_W, EW_B = _ew["w"].astype(np.float32), float(_ew["b"])
     # ONLY WHERE ALPHAEARTH CHANGED: the score is multiplied by clip((change - LO) / (HI - LO), 0, 1), change
     # = 1 - cos(b, a). The model reads each year's look too, and bare ground in both years (a graded pad at the
