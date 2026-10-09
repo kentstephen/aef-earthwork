@@ -1,0 +1,6001 @@
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "marimo",
+#     "datafusion>=54.0.0",
+#     "xarray-sql>=0.3.3",
+#     "xarray",
+#     "zarr>=3.1",
+#     "h3ronpy>=0.22.0",
+#     "pyarrow>=25.0.0",
+#     "obstore>=0.9.2",
+#     "async-geotiff>=0.4",
+#     "anywidget>=0.9",
+#     "numpy",
+#     "duckdb>=1.5.5",
+#     "pyproj",
+#     "pillow",
+#     "pmtiles",
+#     "mapbox-vector-tile",
+#     "scipy",
+#     "scikit-learn",
+#     "shapely>=2",
+#     "rasterio",
+#     "requests",
+#     "traitlets==5.16.1",
+# ]
+# ///
+
+
+"""Earthwork on the fly: where the ground itself moved, from AlphaEarth, taught by 3DEP.
+
+Earthwork (E, the opening mode) is the chance that the ground was physically dug, filled or graded
+between the first and last year read (2023 and 2025 to start, close to the Sentinel-2 imagery's
+2022 to 2025; the years slider reaches back to 2017), not that its surface looked different. The model is earthwork_model.py's: a logistic regression on AlphaEarth's two years, taught
+where 3DEP lidar flew the same ground twice since 2017 (New Albany OH, Katy TX, Lakewood Ranch FL,
+Huntsville AL), the difference of the two 1 m DEMs being the truth of where earth moved more than
+half a meter. Scored on sites it never saw, it found earthwork far better than plain AlphaEarth change
+where much else changed (Huntsville: 64% of its top 5% moved, plain change 6.5%). It finds digs from
+about half a hectare well and most house-pad-sized ones not at all (10 m pixels). The DEM teaches;
+nothing on the map reads it.
+
+Each finer cell of the fold is scored, and each hexagon takes its highest-scoring finer cell (the
+frame's carry-the-peak), so one dig is not averaged away by the quiet ground around it. Viridis by
+the score, on all ground. P pairs the map with Earth Genome's Sentinel-2 on the left to see what each
+hot spot is (2022 to 2025 imagery). The land cover teachers on_the_fly.py reads in the background
+(Impact Observatory, Overture) are not read here; AEF Change's built ground comes from WorldCover.
+
+What follows is on_the_fly.py's own account (embeddings-on-the-fly), from which this is copied.
+
+Built-up ground on the fly, from AlphaEarth.
+
+A copy of aef-explorer's aef-s2-kinds-of-change.py (the map, the H3 folds,
+the per-view land cover reader, the card), with the shared models of
+embeddings-built-up run live on the view:
+
+- One layer at a time. WSF (W) on its own at every zoom, out to
+  continents: tiles of its own pyramid, colored by the year each pixel
+  first read as settlement (the atlas notebook's raw-index tiles, colored
+  in the browser). Or the hexagons in one of the modes below.
+- From zoom 9 the hexagons are AlphaEarth folded to H3, as in Kinds of
+  change.
+- From read res 11 (about zoom 13.2, where the 10 m mosaic is read) the
+  shared models run on every 10 m pixel of the view: the structure reading
+  (does a structure stand on or touch this pixel; height is implicit in
+  AlphaEarth, which GEDI lidar helped teach), and All built (water,
+  forest, grassland, desert, other built-up, road, building), the pooled
+  model stacked with a fit on the view's own live teachers (Overture roads
+  and footprints, WSF built-up away from both, steady Impact Observatory
+  natural classes). Each answer is kept in H3 res 13 cells (each takes the
+  pixel under its center), for the view the model last ran on only (memory);
+  every coarser hexagon is a group-by of them, so the hexagons agree at
+  every zoom. Only what is in view is read. Hexagons reach res
+  13 zoomed in, where structures start to show.
+- Color by: WSF (W), AEF Change (S), All built (A), Structure reading (R),
+  First year built (Y). The card gives the model's account of the
+  clicked hexagon.
+- Hold space for the Sentinel-2 yearly mosaic (Earth Genome, 2022 to 2025).
+- Color by: AEF Change (A), Overture (O: land use, roads, buildings, from
+  Overture's own PMTiles, in the hexagons' place, never over the imagery)
+  or WSF (W). The shared models are off for now (cfg "models"). P pairs the
+  map with Sentinel-2 on the left, the two moving together; paired, O cycles
+  the right map through AEF Change, Overture and WSF.
+
+Run: uv run marimo run on_the_fly.py --sandbox (it fills the window; X or
+Esc gives the notebook back)
+
+Attribution: "The AlphaEarth Foundations
+Satellite Embedding dataset is produced by Google and Google DeepMind"
+(CC BY 4.0). ESA WorldCover 10 m
+2021 v200 (c) ESA WorldCover project, contains modified Copernicus Sentinel
+data (2021) processed by the ESA WorldCover consortium (CC BY 4.0).
+Impact Observatory, Microsoft and Esri 10 m annual land use and land cover
+v02, via Microsoft Planetary Computer (CC BY 4.0). Overture Maps
+transportation and land use, (c) OpenStreetMap contributors (ODbL), from
+Overture's PMTiles (release 2026-08-19.0).
+Sentinel-2 yearly mosaics by Earth Genome (CC BY 4.0). Photon (komoot) over
+OpenStreetMap data (ODbL). Place names from Overture Maps divisions:
+(c) OpenStreetMap contributors, Overture Maps Foundation (ODbL), with
+geoBoundaries, Esri Community Maps contributors and LINZ (CC BY 4.0).
+WSF Tracker (c) DLR and MindEarth, via Source Cooperative (mindearth/wsf,
+DOI 10.5281/zenodo.20424537). Overture Maps buildings, transportation and
+base, from Overture's PMTiles (ODbL; buildings also credit Microsoft,
+Google and Esri Community Maps). Basemap by Carto.
+"""
+
+import marimo
+
+__generated_with = "0.24.0"
+app = marimo.App(width="full", app_title="Earthwork", sql_output="native")
+
+
+@app.cell
+def _():
+    import asyncio
+    import itertools
+    import json
+    import math
+    import os
+    import re
+    import tempfile
+    import time
+    import traceback
+    import urllib.parse
+    import urllib.request
+    import zlib
+
+    import numpy as np
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import xarray as xr
+    import zarr
+    import duckdb
+    import marimo as mo
+    import anywidget
+    import traitlets
+
+    from obstore.store import HTTPStore, S3Store
+    from zarr.storage import ObjectStore
+    from async_geotiff import GeoTIFF, Window
+    from datafusion import udf
+    from xarray_sql import XarrayContext
+    from h3ronpy import change_resolution
+    from h3ronpy.vector import coordinates_to_cells
+    from pyproj import Transformer
+
+    import io
+    from PIL import Image
+
+    # CPU work (the DataFusion folds, tile compositing and PNG encoding, the
+    # footprint rasterizing) leaves the event loop for ONE small pool, so the
+    # network reads (asyncio, US East to the us-west-2 buckets) keep flowing
+    # while it runs and a small machine (molab) is not flooded: at most
+    # CPU_WORKERS such jobs at once, the rest queue
+    from concurrent.futures import ThreadPoolExecutor
+
+    CPU_WORKERS = max(2, min(4, (os.cpu_count() or 2) - 1))
+    _cpu_pool = ThreadPoolExecutor(CPU_WORKERS, thread_name_prefix="cpu")
+
+    async def cpu(fn, *args):
+        """fn(*args) on the CPU pool, awaited."""
+        return await asyncio.get_running_loop().run_in_executor(_cpu_pool, lambda: fn(*args))
+
+    # Source Cooperative through its own proxy, data.source.coop (served by Cloudflare, so the
+    # people who host the data there pay no egress), never the S3 bucket behind it. The proxy
+    # speaks the S3 API, listing included: path-style, each account a bucket
+    SOURCE_COOP = "https://data.source.coop"
+
+    def source_coop(path="", **client_options):
+        """A store on data.source.coop: the whole proxy (paths "account/key") when path is
+        empty, else one account under a prefix ("mindearth/wsf/World_WSF_...zarr")."""
+        if not path:
+            return HTTPStore.from_url(SOURCE_COOP, client_options=client_options or None)
+        account, _, prefix = path.partition("/")
+        return S3Store(account, endpoint=SOURCE_COOP, region="us-west-2", virtual_hosted_style_request=False,
+                       skip_signature=True, prefix=prefix or None, client_options=client_options or None)
+
+    return (
+        GeoTIFF,
+        Image,
+        ObjectStore,
+        S3Store,
+        Transformer,
+        Window,
+        XarrayContext,
+        anywidget,
+        asyncio,
+        change_resolution,
+        coordinates_to_cells,
+        cpu,
+        duckdb,
+        io,
+        itertools,
+        json,
+        math,
+        mo,
+        np,
+        os,
+        pa,
+        pq,
+        re,
+        source_coop,
+        tempfile,
+        time,
+        traceback,
+        traitlets,
+        udf,
+        urllib,
+        xr,
+        zarr,
+        zlib,
+    )
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    # Built-up ground on the fly
+
+    <small>A copy of aef-explorer's Kinds of change, with the shared models
+    of embeddings-built-up run live on the view.</small>
+
+    **What you are looking at.** One layer at a time, picked in Color by:
+    AEF Change (`A`), Overture (`O`) or WSF (`W`). The shared models below
+    are off for now (cfg `models`), and nothing runs them.
+    WSF (`W`) works at every zoom, out to continents: settlement by the year
+    each 10 m pixel first read built, 2016 to the end of the years read.
+    The other modes are hexagons, from zoom 9. From zoom 13.2, where
+    AlphaEarth is read at 10 m, the shared models run on every pixel of the
+    view in the background, and the model modes are drawn from their
+    answers; before that they are empty.
+
+    **The models.** The structure reading gives the chance a structure
+    stands on or touches each 10 m of ground: height is implicit in
+    AlphaEarth, which GEDI lidar and the Copernicus DEM helped teach. All
+    built reads seven classes (water, forest, grassland,
+    desert, other built-up, road, building): a pooled model taught at eight
+    sites, stacked with a fit on the view's own live teachers (Overture
+    roads and footprints, WSF built-up away from both, Impact Observatory's
+    steady natural classes). The view's fit is scored on teachers held out
+    by block; the card gives the score.
+
+    **One answer, every zoom.** Each 10 m answer is kept, for the view the
+    model last ran on, in the H3 res 13 cells whose center falls in the
+    pixel, and every
+    hexagon is a group-by of those: a res 9 hexagon's building share is the
+    share of its res 13 cells that read building. Hexagons reach res 13
+    zoomed in (about zoom 16), where structures start to show.
+
+    **Checking it.** Click a hexagon for the model's account: its classes,
+    structure reading, ground, built share by year, WSF, the Overture
+    footprint cover, and the land cover. Hold space for the Sentinel-2
+    yearly imagery; scroll while holding to change its year.
+
+    | Key | Does |
+    | --- | --- |
+    | `A` | AEF Change: how far the numbers moved, in viridis |
+    | `O` | Overture instead of the hexagons: land use, roads, buildings |
+    | `W` | WSF on its own, at any zoom |
+    | `space` (hold) | the Sentinel-2 imagery instead of the hexagons; the map still drags |
+    | `P` | the pair: Sentinel-2 on the left, the map on the right, one camera |
+    | `O`, paired | the right map: AEF Change, Overture, WSF in turn |
+    | scroll, space held | the imagery year |
+    | `[` `]` | the imagery year, back and forward |
+    | `B` | the imagery's first year (2022) or its latest (2025), back and forth |
+    | `;` `'` | the imagery darker, brighter |
+    | `-` `=` | the first year read, earlier, later |
+    | `_` `+` | the last year read, earlier, later |
+    | `L` | place names on the map, off and on |
+    | `/` | search a place, or paste an H3 string |
+    | `X` | fill the window, and back |
+    | `Esc` | clear the searched outline, then close the about box, the menu, the card, then leave the full window |
+
+    <small>Locally: `uv run marimo run on_the_fly.py --sandbox`</small>
+    """)
+    return
+
+
+@app.cell
+def _(os, tempfile):
+    # ---- constants ----------------------------------------------------------
+    # The imagery is Earth Genome's yearly mosaic, 2022 to 2025; AlphaEarth
+    # runs 2017 to 2025. Not all nine years by default. The window opened at 2021, the year before the imagery starts,
+    # so every imagery year could be a change year ("the scroll should
+    # include all years including 22"); it now opens at 2023 for a lighter
+    # demo: 3 years read, not 5, so change years
+    # 2024 and 2025. Widen it with the window control.
+    S2_YEARS = (2022, 2023, 2024, 2025)
+    AEF_YEARS_ALL = tuple(range(2017, 2026))
+    AEF_FROM0, AEF_TO0 = 2023, 2025  # the window's ends are what Earthwork compares; the slider reaches back to 2017
+    # the first hold opens on the first imagery year, the scroll goes forward
+    # from there,
+    # and every later hold opens where the last one left off ("it should
+    # persist where i leave off")
+    S2_YEAR0 = 2022
+    S2_SCALE0 = 1.0
+
+    # the zoom -> H3 ladder: res 8 at zoom 9, 9 at
+    # 10.4, 10 at 11.8, 11 at 13.2, 12 at 14.6, 13 from 16 (res 13 is where
+    # structures start to show; res 12 only roughly traces them). The budget
+    # lets res 13 through for a zoom 16 view's box
+    ZOOM0, PER_RES, BASE_RES = 6.2, 1.4, 6
+    MIN_RES, MAX_RES = 5, 13
+    CELL_BUDGET = 800_000
+    MOSAIC_MIN_RES = 11
+    AEF_LEVEL_FOR_RES = {5: 7, 6: 7, 7: 5, 8: 4, 9: 3, 10: 1}
+    AEF_MAX_FILES = 2500
+
+    S2_STAC = "https://stac.earthgenome.org/search"
+    S2_COLLECTION = "sentinel2-yearly-mosaics"
+    # where the yearly mosaic is nodata, the same year's temporal mosaic fills
+    # the hole pixel by pixel (2022 and 2023 only on this STAC)
+    S2_FILL_COLLECTION = "sentinel2-temporal-mosaics"
+    # the mosaic pyramid ends at z9 (L5, 306 m); z7-8 are rendered from L5 by
+    # decimation (slow, so no lower)
+    S2_TILE_MIN_Z, S2_PYRAMID_Z, S2_TCI_MAX_Z = 7, 9, 14
+
+    # every S3 read to us-west-2: a short timeout so a stalled request is
+    # retried instead of waited on (US East Coast, 2026-09-24)
+    S3_OPTS = {"timeout": "6s", "connect_timeout": "3s"}
+
+    AEF_PREFIX = "tge-labs/aef-mosaic"
+    AEF_RES, AEF_Y0, AEF_X0 = 8.983111749910169e-05, 83.68570533713473, -180.0
+    AEF_NODATA = -128
+    AEF_INDEX_URL = "https://data.source.coop/tge-labs/aef/v1/annual/aef_index.parquet"
+    CACHE_DIR = os.path.join(tempfile.gettempdir(), "x-sql-marimo", "aef-lcms")
+
+    # ---- ESA WorldCover 2021 (v200), 10 m, straight from ESA's bucket -------
+    #. One COG per 3 x 3
+    # degree tile, EPSG:4326, 36000 px a side, six overviews, named by its
+    # south-west corner (N30E114). 2021 only: ESA says the 2020 and 2021 maps
+    # were made with different algorithms and should not be compared for
+    # change, so the land cover here describes the ground, it does not date
+    # anything.
+    WC_BUCKET, WC_REGION = "esa-worldcover", "eu-central-1"
+    WC_PREFIX = "v200/2021/map"
+    WC_S3_OPTS = {"timeout": "10s", "connect_timeout": "5s"}
+    WC_MAX_TILES = 16
+    WC_CLASSES = (
+        (10, "tree cover"), (20, "shrubland"), (30, "grassland"), (40, "cropland"),
+        (50, "built-up"), (60, "bare or sparse vegetation"), (70, "snow and ice"),
+        (80, "permanent water"), (90, "herbaceous wetland"), (95, "mangroves"), (100, "moss and lichen"),
+    )
+    # THE WHOLE HISTORY: from this read
+    # res on (about zoom 13.2, where the full-res mosaic is read and a view is
+    # small) every AlphaEarth year is read, not just the window. Each
+    # hexagon's change is then judged by what the ground did around it:
+    # one step that held (construction), came back (fields, water, seasons),
+    # changes this much most years (ground that turns over), kept moving
+    # every year (quarries, mines, sites still building out), or too recent
+    # to tell. At read res 10 the reads are slow already (Wuhan z12: 35 s
+    # for five years, 47 s for nine); at 11 the nine take about 17 s.
+    HIST_MIN_RES = 11
+    HIST_RESTLESS = 2.0
+
+    # ---- KINDS OF CHANGE, from AlphaEarth alone ------------------------------------
+    # The finer cells that moved most (the top KINDS_TOP of the view by how
+    # far their vector moved, first to last year read) are grouped by the
+    # DIRECTION they moved: each cell's change minus the change the whole
+    # view made (the embedding's own drift between years), normalized, then
+    # spherical k-means into KINDS_K kinds, the largest first. Ground that
+    # changed the same way lands in the same kind (fields turning over,
+    # water coming and going, land cleared for building).
+    # The groups are this view's: another view groups again.
+    KINDS_K = 6
+    # the grouping into kinds is off: no view draws it any more (it cost a k-means every frame)
+    KINDS_ON = False
+    KINDS_TOP = 0.25
+    # Kinds of change only zoomed in.
+    # Below this hexagon res the map is AEF Change and the land cover
+    # teachers are not read; from it, they are read after the hexagons are
+    # up and Kinds of change is drawn once they are in.
+    KINDS_MIN_RES = 10
+    KINDS_MIN_ZOOM = round(ZOOM0 + PER_RES * (KINDS_MIN_RES - BASE_RES), 1)
+    # ---- LAND COVER READ FROM ALPHAEARTH, every year. The teachers, per finer cell, each year:
+    #  - Impact Observatory's annual land cover (10 m, 2017 to 2023, Planetary
+    #    Computer) teaches its own year on all ground: the map and the
+    #    embedding are of the same year. 2024 and 2025 have no map; there the
+    #    nearest year's map teaches only ground that barely moved.
+    #  - Overture (OpenStreetMap) roads and rail, and land use (construction,
+    #    quarries, landfill -> "construction"; residential, industrial ->
+    #    "built-up"), describe today: they teach the last AlphaEarth year on all
+    #    ground, earlier years only where the ground barely moved. A cell is a
+    #    road when major roads (LC_ROAD_W, their width in m) cover LC_ROAD_FILL
+    #    of it: at zoom 10.5 only the big ones do, zoomed in the rest follow.
+    #  - ESA WorldCover 2021 stands in (quiet ground) when Impact Observatory
+    #    cannot be read.
+    # A cell teaches when LC_PURE of it is one class; "barely moved" is at or
+    # below the view's median change. The reader is a logistic regression per
+    # year on the 64 numbers (so the drift between years is learned with it),
+    # classes balanced to LC_CAP examples, each needing LC_MIN. Measured over
+    # Wuhan z10.5 against WSF (a check, not a teacher): WSF's new buildings
+    # 2022-25 read built-up, road or construction in 2025: 96%; the old
+    # nearest-average reading taught by WorldCover: 15%.
+    LC_PURE = 0.7
+    LC_MIN = 30
+    LC_CAP = 3000
+    LC_VOCAB = ("trees", "grass", "cropland", "built-up", "bare", "water", "wetland", "road", "construction")
+    # what counts as built, by LC_VOCAB index: built-up, and new roads and building sites too
+    BUILT_LC = tuple(LC_VOCAB.index(c) for c in ("built-up", "road", "construction"))
+    # ground already built in the first year read: the rest, read built in the last, is new
+    # and gets kinds of its own (see build_frame)
+    NEW_FROM = tuple(LC_VOCAB.index(c) for c in ("built-up", "road"))
+    # AEF CHANGE ON BUILT GROUND ONLY (as the screenshot notebook's Built only): a hexagon is
+    # drawn when its peak reads built (BUILT_LC) in the last year and at least BUILT_SHARE of its
+    # finer cells do
+    BUILT_SHARE = 0.5
+    IO_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
+    IO_TOKEN = "https://planetarycomputer.microsoft.com/api/sas/v1/token/io-lulc"
+    IO_COLLECTION = "io-lulc-annual-v02"
+    IO_YEARS = tuple(range(2017, 2024))
+    # Impact Observatory's classes in LC_VOCAB (clouds and snow teach nothing)
+    IO_CLASSES = {1: "water", 2: "trees", 4: "wetland", 5: "cropland", 7: "built-up", 8: "bare", 11: "grass"}
+    # Overture's own PMTiles (the divisions file below is one of them):
+    # transportation to zoom 14, base (land use) to zoom 13
+    OV_TILES = ("overturemaps-extras-us-west-2", "tiles/2026-08-19.0")
+    LC_ROAD_W = {"motorway": 30, "trunk": 25, "primary": 20, "secondary": 15, "tertiary": 10, "standard_gauge": 12}
+    LC_ROAD_FILL = 0.35
+
+    # the place under a click: the Overture divisions PMTiles answer at once in
+    # the browser (locality, county, region); then the whole ladder, locality
+    # up to country with each country's own word for the level (local_type),
+    # from Overture's divisions GeoParquet as Fused partitions it on Source
+    # Cooperative (7 s cold, 1 to 3 s after)
+    OV_DIV_PM = "https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/2026-08-19.0/divisions.pmtiles"
+    # the Overture release the model's teachers read and the map draws (O, and the pair)
+    OV_RELEASE = "2026-09-23.1"
+    ADMIN_PQ = "s3://fused/overture/2026-05-20-0/theme=divisions"
+
+    VIEW_W, VIEW_H = 700, 780
+    # the box read around the view, x its width and height: 2 leaves half a
+    # screen each side, so a pan of up to half a screen needs no new read
+    #
+    # only what is in view is read (memory): the box is the view itself; a pan reads again
+    PAD = 1.0
+    SETTLE = 0.35
+    # hexagons from zoom 9, the plain basemap below
+    HEX_ZOOM = 9.0
+    LABELS_SLOT = "watername_ocean"
+    RASTER_TILE = 256
+    HOME = {"longitude": -97.455, "latitude": 30.537, "zoom": 13}  # Samsung's Taylor, Texas fab, graded from 2022
+
+    # how long a still press takes to become a hold, and how far the pointer
+    # may drift before it counts as a pan instead
+    HOLD_MS, HOLD_SLOP_PX = 200, 5
+
+    # the hexagons reach the browser as tiles of cell numbers, not polygons
+    #: each 256 px map
+    # tile is drawn at HEX_TILE_PX a side, every pixel the row of the hexagon
+    # it falls in, colored in the browser
+    HEX_TILE_PX = 512
+    # the zoom ladder below picks the READ res (which AlphaEarth overview is
+    # read). With the hexagons drawn as an image their count no longer costs
+    # the browser, so two knobs, same download:
+    # HEX_UP: the hexagons drawn are this many levels finer than the read res
+    #   (1 is about one hexagon per pixel of the read; past that, empty cells)
+    # CARRY_RES: the fold runs this many levels finer than the hexagons drawn,
+    #   and each hexagon shows its most-changed finer cell ("carry the peak"),
+    #   so a small change is not averaged away zoomed out
+    # (0, 1): hexagons at the read res, each its brightest patch
+    # (1, 0): hexagons about a pixel of the read each, nothing carried
+    HEX_UP = 0
+    CARRY_RES = 1
+
+    # the fill fades with how much the cell changed: quiet ground faint
+    ALPHA_FILL = 235
+    ALPHA_QUIET = 45
+    VIRIDIS = "440154470d6048186a482374472e7c4538824241863e4a893a548c365d8d32658e2e6d8e2b758e287d8e25848e228c8d1f948c1e9c8920a38625ab822eb37c3aba7648c16e58c7656ccd5a7fd34e93d741a8db34c0df25d5e21aeae51afde725"
+    return (
+        ADMIN_PQ,
+        AEF_FROM0,
+        AEF_INDEX_URL,
+        AEF_LEVEL_FOR_RES,
+        AEF_MAX_FILES,
+        AEF_NODATA,
+        AEF_PREFIX,
+        AEF_RES,
+        AEF_TO0,
+        AEF_X0,
+        AEF_Y0,
+        AEF_YEARS_ALL,
+        ALPHA_FILL,
+        ALPHA_QUIET,
+        BASE_RES,
+        BUILT_LC,
+        BUILT_SHARE,
+        CACHE_DIR,
+        CARRY_RES,
+        CELL_BUDGET,
+        HEX_TILE_PX,
+        HEX_UP,
+        HEX_ZOOM,
+        HOLD_MS,
+        HOLD_SLOP_PX,
+        HOME,
+        KINDS_K,
+        KINDS_ON,
+        KINDS_MIN_RES,
+        KINDS_MIN_ZOOM,
+        KINDS_TOP,
+        NEW_FROM,
+        IO_CLASSES,
+        IO_COLLECTION,
+        IO_STAC,
+        IO_TOKEN,
+        IO_YEARS,
+        LABELS_SLOT,
+        LC_CAP,
+        LC_MIN,
+        LC_PURE,
+        LC_ROAD_FILL,
+        LC_ROAD_W,
+        LC_VOCAB,
+        OV_TILES,
+        MAX_RES,
+        MIN_RES,
+        MOSAIC_MIN_RES,
+        HIST_MIN_RES,
+        HIST_RESTLESS,
+        OV_DIV_PM,
+        OV_RELEASE,
+        PAD,
+        PER_RES,
+        RASTER_TILE,
+        S2_COLLECTION,
+        S2_FILL_COLLECTION,
+        S2_PYRAMID_Z,
+        S2_SCALE0,
+        S2_STAC,
+        S2_TCI_MAX_Z,
+        S2_TILE_MIN_Z,
+        S2_YEAR0,
+        S2_YEARS,
+        S3_OPTS,
+        SETTLE,
+        VIEW_H,
+        VIEW_W,
+        VIRIDIS,
+        WC_BUCKET,
+        WC_CLASSES,
+        WC_MAX_TILES,
+        WC_PREFIX,
+        WC_REGION,
+        WC_S3_OPTS,
+        ZOOM0,
+    )
+
+
+@app.cell
+def _(
+    BASE_RES,
+    CELL_BUDGET,
+    MAX_RES,
+    MIN_RES,
+    PAD,
+    PER_RES,
+    VIEW_H,
+    VIEW_W,
+    ZOOM0,
+    math,
+):
+    # ---- the camera -> box and res --------------------------------------------
+    CELL_KM2 = {5: 252.9, 6: 36.13, 7: 5.161, 8: 0.7373, 9: 0.1053, 10: 0.01505, 11: 0.00215, 12: 0.000307, 13: 0.0000439}
+
+    def _lat_to_y(lat):
+        r = math.radians(lat)
+        return (1 - math.log(math.tan(r) + 1 / math.cos(r)) / math.pi) / 2
+
+    def _y_to_lat(y):
+        return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y))))
+
+    def view_to_bbox(vs):
+        """The flat camera footprint (W, S, E, N) of ONE pane; the widget reports
+        the pane's canvas size (`w`, `h`) with every move."""
+        world = 512 * (2 ** vs["zoom"])
+        w, h = vs.get("w") or VIEW_W, vs.get("h") or VIEW_H
+        half_lon = 360.0 * w / world / 2
+        yc, half_y = _lat_to_y(vs["latitude"]), h / world / 2
+        return (
+            vs["longitude"] - half_lon,
+            _y_to_lat(yc + half_y),
+            vs["longitude"] + half_lon,
+            _y_to_lat(yc - half_y),
+        )
+
+    def pad_box(b, f=PAD):
+        dx, dy = (b[2] - b[0]) * (f - 1) / 2, (b[3] - b[1]) * (f - 1) / 2
+        return (max(-179.9, b[0] - dx), max(-85.0, b[1] - dy), min(179.9, b[2] + dx), min(85.0, b[3] + dy))
+
+    def box_km2(b):
+        w = (b[2] - b[0]) * 111.32 * math.cos(math.radians((b[1] + b[3]) / 2))
+        return abs(w * (b[3] - b[1]) * 110.57)
+
+    def res_for_view(vs, box):
+        r = max(MIN_RES, min(MAX_RES, BASE_RES + math.floor((vs["zoom"] - ZOOM0) / PER_RES)))
+        while r > MIN_RES and box_km2(box) / CELL_KM2[r] > CELL_BUDGET:
+            r -= 1
+        return r
+
+    def contains(outer, inner):
+        return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
+
+    return CELL_KM2, box_km2, contains, pad_box, res_for_view, view_to_bbox
+
+
+@app.cell
+def _(XarrayContext, coordinates_to_cells, pa, udf):
+    # THE FOLD IS THE H3 UDF INSIDE DATAFUSION (repo rule). One context, every fold.
+    ctx = XarrayContext()
+    ctx.register_udf(
+        udf(
+            lambda la, lo, r: pa.array(coordinates_to_cells(la.to_numpy(), lo.to_numpy(), r[0].as_py())),
+            [pa.float64(), pa.float64(), pa.int32()],
+            pa.uint64(),
+            "stable",
+            name="h3_latlng_to_cell",
+        )
+    )
+    return (ctx,)
+
+
+
+@app.cell
+def _(
+    AEF_INDEX_URL,
+    AEF_LEVEL_FOR_RES,
+    AEF_MAX_FILES,
+    AEF_NODATA,
+    AEF_PREFIX,
+    AEF_RES,
+    AEF_X0,
+    AEF_Y0,
+    AEF_YEARS_ALL,
+    CACHE_DIR,
+    GeoTIFF,
+    MOSAIC_MIN_RES,
+    ObjectStore,
+    S3Store,
+    S3_OPTS,
+    source_coop,
+    Transformer,
+    Window,
+    asyncio,
+    cpu,
+    ctx,
+    duckdb,
+    itertools,
+    np,
+    os,
+    pq,
+    time,
+    xr,
+    zarr,
+):
+    # ---- AlphaEarth: the COG overviews (mosaic past res 10), one fold per year --
+    # `aef_fold(box, res, year)` for any year in AEF_YEARS_ALL (2017..2025, the
+    # whole run; the window control picks from them); each year has its own COG index
+    # slice (cached as parquet under tmp) and its own mosaic time index.
+    class _Kept:
+        """THE COG READS, KEPT FOR THE SESSION: the compressed byte ranges async-geotiff
+        asks for (one per band per tile, ~0.38 MB; a 1024 tile of 64 bands
+        ~24 MB, 41 km of ground at 40 m) are kept in memory, oldest dropped
+        past the cap, gone when the kernel stops. Zooming, panning nearby
+        and changing the years read reuse the tiles instead of downloading
+        them again."""
+
+        def __init__(self, inner, cap):
+            self._in, self._cap, self._kept, self.held = inner, cap, {}, 0
+            self.reused = self.fetched = 0
+            self._sem = asyncio.Semaphore(48)
+            self._fly = {}  # range -> its download in flight, shared
+
+        def _take(self, k):
+            b = self._kept.pop(k, None)
+            if b is not None:
+                self._kept[k] = b  # to the newest end
+                self.reused += len(b)
+            return b
+
+        def _put(self, k, b):
+            self._kept[k] = b
+            self.held += len(b)
+            self.fetched += len(b)
+            while self.held > self._cap and self._kept:
+                self.held -= len(self._kept.pop(next(iter(self._kept))))
+
+        async def get_range_async(self, path, *, start, end=None, length=None):
+            end = start + length if end is None else end
+            b = self._take((path, start, end))
+            if b is None:
+                b = await self._in.get_range_async(path, start=start, end=end)
+                self._put((path, start, end), b)
+            return b
+
+        async def _one(self, path, a, e):
+            # one band's tile, on its own: S3 merges nearby ranges into one
+            # request, and a file's 64 bands merged are ~48 MB, past the 6 s
+            # timeout on a home connection.
+            # Small requests side by side, each retried twice.
+            for k in range(3):
+                try:
+                    async with self._sem:
+                        return await self._in.get_range_async(path, start=a, end=e)
+                except Exception:
+                    if k == 2:
+                        raise
+                    await asyncio.sleep(0.5 * (k + 1))
+
+        async def _fetch(self, k):
+            try:
+                b = await self._one(*k)
+                self._put(k, b)
+                return b
+            finally:
+                self._fly.pop(k, None)
+
+        async def get_ranges_async(self, path, *, starts, ends=None, lengths=None):
+            ends = [a + n for a, n in zip(starts, lengths)] if ends is None else list(ends)
+            out = [self._take((path, a, e)) for a, e in zip(starts, ends)]
+            miss = [i for i, b in enumerate(out) if b is None]
+            if miss:
+                # a range already downloading (the read ahead, or another
+                # year's fold) is waited on, not asked for again; shielded, so
+                # a cancelled read still leaves its bytes kept
+                futs = []
+                for i in miss:
+                    k = (path, starts[i], ends[i])
+                    if k not in self._fly:
+                        self._fly[k] = asyncio.ensure_future(self._fetch(k))
+                    futs.append(asyncio.shield(self._fly[k]))
+                for i, b in zip(miss, await asyncio.gather(*futs)):
+                    out[i] = b
+            return out
+
+    # 6 GB: one view in a 2x box downloads 1.2 to 1.8 GB, so 2 GB held about
+    # one view and a pan pushed out what was just read (molab: 32 GB)
+    _store = _Kept(source_coop(**S3_OPTS), 1 * 1024 ** 3)
+    _mstore = source_coop(AEF_PREFIX, **S3_OPTS)
+    # only the years are needed from the mosaic's metadata: its time array, read alone (opening
+    # the whole dataset lists the store, 13 s through the proxy)
+    _mt = zarr.open_group(ObjectStore(_mstore, read_only=True), mode="r")["time"][:]
+    _ti = {y: int(np.where(_mt == y)[0][0]) for y in AEF_YEARS_ALL}
+    # The mosaic is sharded (4096 px shards of 256 px chunks, 64 bands, int8):
+    # one read of a window fetches its chunks ONE AFTER ANOTHER, so a 9 km
+    # view took 31 s a year from the US East Coast (1.2 MB/s, 38 MB; zarr's
+    # async.concurrency made no difference). The window is read instead as
+    # its chunk-aligned blocks, all at once, through zarr's async API on this
+    # loop: 2.8 s for the same year (measured 2026-09-24, Wuhan, 16 blocks)
+    _memb = zarr.open_group(ObjectStore(_mstore, read_only=True), mode="r")["embeddings"]
+    _mb = int(_memb.chunks[-1])
+    _memb = _memb._async_array
+    _msem = asyncio.Semaphore(48)
+    _mkept, _mfly, _mheld = {}, {}, [0]
+
+    async def _mosaic(ti, y0, y1, x0, x1):
+        """The mosaic's (64, y1 - y0, x1 - x0) int8 window for time index ti."""
+        out = np.empty((64, y1 - y0, x1 - x0), np.int8)
+
+        async def one(r, c):
+            k = (ti, r, c)
+            b = _mkept.pop(k, None)
+            if b is None:
+                if k not in _mfly:
+                    async def get():
+                        try:
+                            async with _msem:
+                                return await _memb.getitem((ti, slice(None), slice(r, r + _mb), slice(c, c + _mb)))
+                        finally:
+                            _mfly.pop(k, None)
+                    _mfly[k] = asyncio.ensure_future(get())
+                b = await asyncio.shield(_mfly[k])
+            _mkept[k] = b
+            _mheld[0] = sum(v.nbytes for v in _mkept.values())
+            while _mheld[0] > 512 * 1024 ** 2 and len(_mkept) > 1:
+                _mheld[0] -= _mkept.pop(next(iter(_mkept))).nbytes
+            r0, r1, c0, c1 = max(r, y0), min(r + _mb, y1), max(c, x0), min(c + _mb, x1)
+            out[:, r0 - y0:r1 - y0, c0 - x0:c1 - x0] = b[:, r0 - r:r1 - r, c0 - c:c1 - c]
+
+        await asyncio.gather(*(one(r, c) for r in range(y0 // _mb * _mb, y1, _mb) for c in range(x0 // _mb * _mb, x1, _mb)))
+        return out
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    _IDX, _PATHS, _CRS = {}, {}, {}
+    for _y in AEF_YEARS_ALL:
+        _idx_path = os.path.join(CACHE_DIR, f"aef_index_{_y}_world.parquet")
+        if not os.path.exists(_idx_path):
+            _c = duckdb.connect()
+            _c.execute("INSTALL httpfs; LOAD httpfs")
+            _t = _c.execute(f"""
+                SELECT path, crs, utm_west, utm_south, utm_east, utm_north,
+                       wgs84_west, wgs84_south, wgs84_east, wgs84_north
+                FROM read_parquet('{AEF_INDEX_URL}')
+                WHERE year = {_y}
+            """).arrow().read_all()
+            pq.write_table(_t, _idx_path)
+            _c.close()
+        _tab = pq.read_table(_idx_path)
+        _IDX[_y] = {k: _tab[k].to_numpy() for k in _tab.column_names if k not in ("path", "crs")}
+        _PATHS[_y] = _tab["path"].to_pylist()
+        _CRS[_y] = _tab["crs"].to_pylist()
+
+    _open = {}
+    _sem = asyncio.Semaphore(64)
+    _tf_fwd, _tf_inv = {}, {}
+
+    def _tf(crs):
+        if crs not in _tf_fwd:
+            _tf_fwd[crs] = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+            _tf_inv[crs] = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+        return _tf_fwd[crs], _tf_inv[crs]
+
+    async def _get(path):
+        rel = path.split("source.coop/")[1]
+        if rel not in _open:
+            async with _sem:
+                _open[rel] = await GeoTIFF.open(rel, store=_store)
+        return _open[rel]
+
+    async def _read_cog(year, i, li, box):
+        """One file's overview window over the box: (int8 (64, h, w), lon, lat)
+        or None. Through the file's affine (these COGs are stored south-up)."""
+        g = await _get(_PATHS[year][i])
+        ov = g.overviews[li]
+        H, W = ov.shape
+        t = g.transform
+        sx, sy = t.a * (g.width / W), t.e * (g.height / H)
+        fwd, inv = _tf(_CRS[year][i])
+        W_, S_, E_, N_ = box
+        lons = np.concatenate([np.linspace(W_, E_, 5), np.full(5, E_), np.linspace(E_, W_, 5), np.full(5, W_)])
+        lats = np.concatenate([np.full(5, N_), np.linspace(N_, S_, 5), np.full(5, S_), np.linspace(S_, N_, 5)])
+        ux, uy = fwd.transform(lons, lats)
+        cc = (np.asarray(ux) - t.c) / sx
+        rr = (np.asarray(uy) - t.f) / sy
+        c0 = max(0, int(np.floor(np.nanmin(cc))))
+        c1 = min(W, int(np.ceil(np.nanmax(cc))))
+        r0 = max(0, int(np.floor(np.nanmin(rr))))
+        r1 = min(H, int(np.ceil(np.nanmax(rr))))
+        if c1 <= c0 or r1 <= r0:
+            return None
+        async with _sem:
+            ra = await ov.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
+
+        def _place():
+            a = np.asarray(np.ma.filled(ra.as_masked(), AEF_NODATA)).reshape(64, r1 - r0, c1 - c0)
+            xs = t.c + (np.arange(c0, c1) + 0.5) * sx
+            ys = t.f + (np.arange(r0, r1) + 0.5) * sy
+            X, Y = np.meshgrid(xs, ys)
+            lon, lat = inv.transform(X, Y)
+            return a, lon, lat
+
+        return await cpu(_place)
+
+    _DEQ = ", ".join(f"avg(signum(e{i:02d}) * power(e{i:02d} / 127.5, 2)) AS e{i:02d}" for i in range(64))
+    _seq = itertools.count()  # a table name per fold: the years fold side by side on the CPU pool
+
+    def _compact(t):
+        """A year's fold as {"cell": sorted uint64, "V": float32 (n, 64), each
+        row unit length, NaN where it has none}: made once per read, so every
+        frame built from it lines the years up by cell with no join and no
+        restack of 64 columns (1 s of a 3.4 s frame at a 2x box), at half the
+        memory of the float64 table."""
+        cell = t["cell"].to_numpy().astype(np.uint64)
+        o = np.argsort(cell)
+        V = np.empty((len(cell), 64), np.float32)
+        for i in range(64):
+            V[:, i] = t[f"e{i:02d}"].to_numpy(zero_copy_only=False)[o]
+        nrm = np.linalg.norm(V, axis=1)
+        V /= np.maximum(nrm, 1e-9)[:, None]
+        V[~np.isfinite(nrm) | (nrm == 0)] = np.nan
+        return {"cell": cell[o], "V": V}
+
+    def _fold_rows_sync(res, box, cols, lat, lon):
+        W_, S_, E_, N_ = box
+        name = f"aef_{next(_seq)}"
+        ds1 = xr.Dataset(
+            {f"e{i:02d}": (("i",), cols[i]) for i in range(64)} | {"lat": (("i",), lat), "lon": (("i",), lon)},
+            coords={"i": np.arange(lat.size)},
+        )
+        ctx.from_dataset(name, ds1, chunks={"i": 262_144})
+        try:
+            return ctx.sql(f"""
+                SELECT h3_latlng_to_cell(lat, lon, CAST({res} AS INT)) AS cell, count(*) AS naef, {_DEQ}
+                FROM {name}
+                WHERE e00 != {AEF_NODATA}
+                  AND lon >= {W_} AND lon < {E_} AND lat >= {S_} AND lat < {N_}
+                GROUP BY cell
+            """).to_arrow_table()
+        finally:
+            ctx.deregister_table(name)
+
+    async def aef_window(box, year):
+        """The mosaic's native 10 m window under the box for one year:
+        (int8 (64, h, w), lon0, lat0 of the north-west corner, pixel) or None."""
+        W_, S_, E_, N_ = box
+        x0, x1 = int((W_ - AEF_X0) / AEF_RES), int((E_ - AEF_X0) / AEF_RES)
+        y0, y1 = int((AEF_Y0 - N_) / AEF_RES), int((AEF_Y0 - S_) / AEF_RES)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        emb = await _mosaic(_ti[year], y0, y1, x0, x1)
+        return emb, AEF_X0 + x0 * AEF_RES, AEF_Y0 - y0 * AEF_RES, AEF_RES
+
+    async def aef_fold(box, res, year, read_res=None):
+        """Mean AlphaEarth vector per res cell over the box for one year, from
+        the source that suits read_res (default res): a finer res than the
+        read's own gives cells of about a pixel each (the carried peak).
+        Returns (arrow table or None, stats)."""
+        t0 = time.time()
+        W_, S_, E_, N_ = box
+        rr = res if read_res is None else read_res
+        if rr >= MOSAIC_MIN_RES:
+            x0, x1 = int((W_ - AEF_X0) / AEF_RES), int((E_ - AEF_X0) / AEF_RES)
+            y0, y1 = int((AEF_Y0 - N_) / AEF_RES), int((AEF_Y0 - S_) / AEF_RES)
+            emb = await _mosaic(_ti[year], y0, y1, x0, x1)
+            lat = AEF_Y0 - (np.arange(y0, y1) + 0.5) * AEF_RES
+            lon = AEF_X0 + (np.arange(x0, x1) + 0.5) * AEF_RES
+            t1 = time.time()
+
+            def _fold_mosaic():
+                LON, LAT = np.meshgrid(lon, lat)
+                return _compact(_fold_rows_sync(res, box, emb.reshape(64, -1), LAT.ravel(), LON.ravel()))
+
+            # RES 13 THE OTHER WAY ROUND: a 10 m pixel holds about 2.3 res 13 cells, so folding
+            # pixel centers leaves most res 13 cells empty (dots with gaps). Every res 13 cell in
+            # the box takes the pixel under its center instead (as the model's store does)
+            def _fold_centers():
+                import shapely
+                from h3ronpy.vector import cells_to_coordinates, wkb_to_cells
+                cl = wkb_to_cells(pa.array([shapely.to_wkb(shapely.box(W_, S_, E_, N_))], pa.binary()), res, flatten=True)
+                cells = np.sort(np.asarray(pa.array(cl)).astype(np.uint64))
+                xy = cells_to_coordinates(pa.array(cells))
+                r = np.floor((AEF_Y0 - np.asarray(pa.array(xy.column("lat")))) / AEF_RES).astype(np.int64) - y0
+                c = np.floor((np.asarray(pa.array(xy.column("lng"))) - AEF_X0) / AEF_RES).astype(np.int64) - x0
+                ok = (r >= 0) & (r < emb.shape[1]) & (c >= 0) & (c < emb.shape[2])
+                q = emb[:, r[ok], c[ok]].T
+                V = q.astype(np.float32)
+                V = np.sign(V) * (V / 127.5) ** 2
+                bad = q[:, 0] == AEF_NODATA
+                nrm = np.linalg.norm(V, axis=1)
+                V /= np.maximum(nrm, 1e-9)[:, None]
+                V[bad | (nrm == 0)] = np.nan
+                return {"cell": cells[ok], "V": V}
+
+            if res >= 13:
+                _fold_mosaic = _fold_centers  # noqa: F811
+
+            out = await cpu(_fold_mosaic)
+            return out, f"AEF {year} mosaic {t1 - t0:.1f} s · fold {len(out['cell']):,} {time.time() - t1:.1f} s"
+        li = AEF_LEVEL_FOR_RES[rr]
+        ix = _IDX[year]
+        hit = np.where(
+            (ix["wgs84_east"] > W_) & (ix["wgs84_west"] < E_) & (ix["wgs84_north"] > S_) & (ix["wgs84_south"] < N_)
+        )[0]
+        if len(hit) == 0:
+            return None, f"AEF {year}: no COG tiles under the view"
+        if len(hit) > AEF_MAX_FILES:
+            return None, f"AEF {year}: {len(hit):,} tiles under the view; zoom in"
+        parts = await asyncio.gather(*(_read_cog(year, int(i), li, box) for i in hit), return_exceptions=True)
+        bad = [p for p in parts if isinstance(p, BaseException)]
+        if any(isinstance(p, asyncio.CancelledError) for p in bad):
+            raise asyncio.CancelledError()
+        parts = [p for p in parts if p is not None and not isinstance(p, BaseException)]
+        if not parts:
+            return None, f"AEF {year}: nothing read" + (f" ({type(bad[0]).__name__}: {str(bad[0])[:80]})" if bad else "")
+        t1 = time.time()
+
+        def _cogs():
+            cols = np.concatenate([p[0].reshape(64, -1) for p in parts], axis=1)
+            lon = np.concatenate([p[1].ravel() for p in parts])
+            lat = np.concatenate([p[2].ravel() for p in parts])
+            return _compact(_fold_rows_sync(res, box, cols, lat, lon)), cols.shape[1]
+
+        out, npx = await cpu(_cogs)
+        return out, (
+            f"AEF {year} ov{li} ({10 * 2 ** (li + 1)} m) {len(parts)} files {npx / 1e6:.2f} Mpx "
+            f"{t1 - t0:.1f} s · fold {len(out['cell']):,} {time.time() - t1:.1f} s"
+            f" · kept {_store.held / 1e6:,.0f} MB (fetched {_store.fetched / 1e6:,.0f}, reused {_store.reused / 1e6:,.0f})"
+            + (f" · {len(bad)} files failed ({type(bad[0]).__name__})" if bad else "")
+        )
+
+    return aef_fold, aef_window
+
+
+
+
+@app.cell
+def _(
+    GeoTIFF,
+    Image,
+    RASTER_TILE,
+    S2_COLLECTION,
+    S2_FILL_COLLECTION,
+    S2_PYRAMID_Z,
+    S2_SCALE0,
+    S2_STAC,
+    S2_TCI_MAX_Z,
+    S2_TILE_MIN_Z,
+    S3Store,
+    S3_OPTS,
+    source_coop,
+    Window,
+    asyncio,
+    cpu,
+    io,
+    json,
+    math,
+    np,
+    time,
+    urllib,
+):
+    # ---- Sentinel-2 TCI tiles, by YEAR: the left pane ---------------------------
+    # STAC once per (year, z9 ancestor tile), every footprint under the tile
+    # composited in numpy (black = nodata -> alpha 0; first footprint to paint a
+    # pixel wins), one PNG. The year lives in the item id
+    # (`10SFJ_2024-01-01_2025-01-01`); the STAC datetime filter does not
+    # constrain these items, so it is enforced on the id. The yearly footprints
+    # come first, then the same year's S2_FILL_COLLECTION footprints (ids
+    # suffixed `#fill`): first-to-paint-wins is the backfill.
+    _store = source_coop(**S3_OPTS)
+    _R = 6378137.0
+    _items = {}  # item id -> {tci: path, bbox}
+    _boxes = {}  # (year, rounded box) -> item ids
+    _searches = {}  # rounded box -> the STAC search's future: one search answers every year
+    _open = {}
+    _sem = asyncio.Semaphore(32)
+    _png = {}  # (year, z, x, y, scale) -> PNG bytes or None
+    _arr = {}  # (year, z, x, y) -> the composited RGBA tile before the gain, or None
+    _gain = {"v": float(S2_SCALE0)}  # the strip's `gamma`
+    _LUT = {}  # gamma -> the 256-entry curve
+    _tstat = {"served": 0, "blank": 0, "ms": 0.0}
+    _fill = {}  # year -> [pixels painted by the fill collection, pixels painted]
+
+    def _png_of(out, g):
+        """The gamma (the header's `gamma`) on the composited bytes, then PNG:
+        v -> 255 (v / 255) ** (1 / gamma), a lift of the midtones that keeps
+        the bright end unclipped (a gain clipped it). Pure: runs on the pool."""
+        if g not in _LUT:
+            _LUT[g] = (255.0 * (np.arange(256, dtype=np.float64) / 255.0) ** (1.0 / g)).round().astype(np.uint8)
+        rgba = out if g == 1.0 else np.concatenate([_LUT[g][out[..., :3]], out[..., 3:]], axis=2)
+        buf = io.BytesIO()
+        Image.fromarray(np.ascontiguousarray(rgba), mode="RGBA").save(buf, format="PNG")
+        return buf.getvalue()
+
+    async def _encode(key, out):
+        _png[key] = await cpu(_png_of, out, key[-1])
+        if len(_png) > 6000:
+            _png.pop(next(iter(_png)))
+        return _png[key]
+
+    def _stac(box):
+        body = json.dumps(
+            {"collections": [S2_COLLECTION, S2_FILL_COLLECTION], "bbox": list(box), "limit": 200}
+        ).encode()
+        req = urllib.request.Request(S2_STAC, data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)["features"]
+
+    # False colors from the raw bands (uint16 reflectance x 10,000, next to TCI in every item):
+    # TCI clips bright ground (sand: a third of the pixels at 255 in Dubai, where the red band
+    # runs to 0.56). Each band is stretched to its 98th percentile over the view (as segments-map
+    # does), one stretch for every year so the years compare; set again when the colors are
+    # chosen or a hold starts somewhere the stretch was not taken
+    #   urban        B12 B11 B4: built ground and bare soil apart by hue
+    #   blueyellow   B11 B11 B2: SWIR on red and green, blue on blue: sand yellow, concrete blue
+    S2_COMPOSITES = {"tci": None, "urban": ("B12", "B11", "B04"), "blueyellow": ("B11", "B11", "B02")}
+    _BANDS = ("B02", "B04", "B11", "B12")
+    # (above every function that uses them: marimo drops a cell's private name used before it is defined)
+    _comp = {"name": "tci", "box": None, "scale": None, "gen": 0, "lock": None}
+
+
+    async def _s2_items(box, year):
+        key = (year, tuple(round(v, 2) for v in box))
+        if key not in _boxes:
+            if key[1] not in _searches:
+                _searches[key[1]] = asyncio.get_running_loop().run_in_executor(None, _stac, box)
+            try:
+                both = await asyncio.shield(_searches[key[1]])
+            except Exception:
+                _searches.pop(key[1], None)
+                raise
+            feats = [f for f in both if f.get("collection") != S2_FILL_COLLECTION]
+            ids, fill_ids = [], []
+            for f in both:
+                if not f["id"].endswith(f"{year}-01-01_{year + 1}-01-01"):
+                    continue
+                if f.get("collection") == S2_FILL_COLLECTION:
+                    iid = f["id"] + "#fill"
+                    _items[iid] = {"tci": f["assets"]["TCI"]["href"].split("source.coop/")[1], "bbox": f.get("bbox"), "fill": True,
+                                   "bands": {k: a["href"].split("source.coop/")[1] for k, a in f["assets"].items() if k in _BANDS}}
+                    fill_ids.append(iid)
+                    continue
+                _items[f["id"]] = {"tci": f["assets"]["TCI"]["href"].split("source.coop/")[1], "bbox": f.get("bbox"),
+                                   "bands": {k: a["href"].split("source.coop/")[1] for k, a in f["assets"].items() if k in _BANDS}}
+                ids.append(f["id"])
+            if not ids and feats:
+                # the STAC lags the bucket (2025 is there for every tile round
+                # Dixie, uploaded 2026-01-31, and the search does not know it):
+                # the same MGRS tile's path with the year swapped, the sibling's
+                # bbox; a tile that is not there reads as empty, not an error
+                seen = set()
+                for f in feats:
+                    tile = f["id"].split("_")[0]
+                    if tile in seen:
+                        continue
+                    seen.add(tile)
+                    iid = f"{tile}_{year}-01-01_{year + 1}-01-01"
+                    base = f["assets"]["TCI"]["href"].split("source.coop/")[1].rsplit("/", 2)[0]
+                    _items[iid] = {"tci": f"{base}/{iid}/TCI.tif", "bbox": f.get("bbox"), "bands": {k: f"{base}/{iid}/{k}.tif" for k in _BANDS}}
+                    ids.append(iid)
+            _boxes[key] = ids + fill_ids  # yearly first: the fill only paints what they left
+        return _boxes[key]
+
+    async def _get(rel):
+        if rel not in _open:
+            async with _sem:
+                try:
+                    _open[rel] = await GeoTIFF.open(rel, store=_store)
+                except Exception:
+                    _open[rel] = None  # not in the bucket (a synthesized year): empty
+        return _open[rel]
+
+    def s2_set_composite(name, box):
+        """Choose the imagery colors for the view box. True when the tiles must be asked again."""
+        if name not in S2_COMPOSITES:
+            return False
+        b = _comp["box"]
+        inside = b is not None and box is not None and b[0] <= box[0] and b[1] <= box[1] and b[2] >= box[2] and b[3] >= box[3]
+        if name == _comp["name"] and (name == "tci" or inside):
+            return False
+        _comp.update(name=name, box=tuple(box) if box is not None else None, scale=None)
+        _comp["gen"] += 1
+        return True
+
+    def _level(g, tpx):
+        """The coarsest level of g whose pixel is no coarser than tpx (m), and its pixel."""
+        L, _B, R_, _T = g.bounds
+        best = (g, (R_ - L) / g.shape[1])
+        for lv in g.overviews:
+            px = (R_ - L) / lv.shape[1]
+            if px <= tpx * 1.01:
+                best = (lv, px)
+        return best
+
+    async def _comp_scale():
+        """Each band's 98th percentile over the view, from the latest year with imagery there."""
+        box = _comp["box"]
+        if box is None:
+            return {}
+        W_, S_, E_, N_ = box
+        mx = lambda lon: _R * math.radians(lon)
+        my = lambda lat: _R * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+        x0, x1, y0, y1 = mx(W_), mx(E_), my(S_), my(N_)
+        ids = []
+        for yr in reversed(S2_YEARS):
+            ids = [i for i in await _s2_items(box, yr) if not _items[i].get("fill")]
+            if ids:
+                break
+        out = {}
+        for band in sorted(set(S2_COMPOSITES[_comp["name"]])):
+            vals = []
+            for iid in ids[:6]:
+                path = _items[iid].get("bands", {}).get(band)
+                g = await _get(path) if path else None
+                if g is None:
+                    continue
+                lv, px = _level(g, max((x1 - x0), (y1 - y0)) / 512)
+                L, _B, R_, Tt = g.bounds
+                H, W = lv.shape
+                c0, c1 = max(0, int((x0 - L) / px)), min(W, int(math.ceil((x1 - L) / px)))
+                r0, r1 = max(0, int((Tt - y1) / px)), min(H, int(math.ceil((Tt - y0) / px)))
+                if c1 <= c0 or r1 <= r0:
+                    continue
+                async with _sem:
+                    ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
+                a = np.asarray(np.ma.filled(ra.as_masked(), 0)).ravel()
+                vals.append(a[a > 0])
+            v = np.concatenate(vals) if vals else np.zeros(0)
+            out[band] = float(np.percentile(v, 98)) if len(v) > 100 else 3000.0
+        return out
+
+    def _tile_ll(z, x, y):
+        n = 2 ** z
+        lat = lambda yy: math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
+        return x / n * 360 - 180, lat(y + 1), (x + 1) / n * 360 - 180, lat(y)
+
+    async def _items_for_tile(z, x, y, year):
+        # STAC per z9 ancestor tile from z9 up; below it, per the tile itself
+        d = max(0, z - S2_PYRAMID_Z)
+        ids = await _s2_items(_tile_ll(z - d, x >> d, y >> d), year)
+        W_, S_, E_, N_ = _tile_ll(z, x, y)
+        out = []
+        for i in ids:
+            b = _items[i].get("bbox")
+            if not b or (b[0] < E_ and b[2] > W_ and b[1] < N_ and b[3] > S_):
+                out.append(i)
+        return out
+
+    async def s2_tile_png(z, x, y, year):
+        """PNG bytes for Web Mercator tile (z, x, y) of the year's TCI mosaic, or
+        None (below S2_TILE_MIN_Z, or no footprint under the tile)."""
+        cname, cgen = _comp["name"], _comp["gen"]
+        key = (year, z, x, y, cname, cgen, _gain["v"])
+        if key in _png:
+            return _png[key]
+        akey = (year, z, x, y, cname, cgen)
+        if akey in _arr:
+            # composited already at another scale: re-encode, no read
+            out = _arr[akey]
+            return (await _encode(key, out)) if out is not None else None
+        if z < S2_TILE_MIN_Z or z > S2_TCI_MAX_Z:
+            _tstat["blank"] += 1
+            return None
+        ids = await _items_for_tile(z, x, y, year)
+        if not ids:
+            _tstat["blank"] += 1
+            return None
+        t0 = time.time()
+        T = RASTER_TILE
+        n = 2 ** z
+        world = 2 * math.pi * _R
+        tpx = world / (n * T)
+        tx0, ty1 = -world / 2 + x * world / n, world / 2 - y * world / n
+        xs = tx0 + (np.arange(T) + 0.5) * tpx
+        ys = ty1 - (np.arange(T) + 0.5) * tpx
+        li = min(S2_TCI_MAX_Z - z, S2_TCI_MAX_Z - S2_PYRAMID_Z)  # L5 (306 m) below z9: decimated
+
+        async def _read(iid):
+            """One footprint's window under the tile: (ra, c0, r0, h, w, px, L, Tt) or None."""
+            g = await _get(_items[iid]["tci"])
+            if g is None:
+                return None
+            lv = [g, *g.overviews][li]
+            L, _B, R_, Tt = g.bounds
+            H, W = lv.shape
+            px = (R_ - L) / W
+            c0, c1 = max(0, int(math.floor((tx0 - L) / px))), min(W, int(math.ceil((tx0 + T * tpx - L) / px)))
+            r0, r1 = max(0, int(math.floor((Tt - ty1) / px))), min(H, int(math.ceil((Tt - (ty1 - T * tpx)) / px)))
+            if c1 <= c0 or r1 <= r0:
+                return None
+            async with _sem:
+                ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
+            return ra, c0, r0, r1 - r0, c1 - c0, px, L, Tt
+
+        bands = S2_COMPOSITES.get(cname)
+        if bands:
+            if _comp["lock"] is None:
+                _comp["lock"] = asyncio.Lock()
+            async with _comp["lock"]:
+                if _comp["scale"] is None and _comp["gen"] == cgen:
+                    _comp["scale"] = await _comp_scale()
+            scale = _comp["scale"] or {}
+
+            async def _read_band(iid, band):
+                path = _items[iid].get("bands", {}).get(band)
+                g = await _get(path) if path else None
+                if g is None:
+                    return None
+                lv, px = _level(g, tpx)
+                L, _B, R_, Tt = g.bounds
+                H, W = lv.shape
+                c0, c1 = max(0, int(math.floor((tx0 - L) / px))), min(W, int(math.ceil((tx0 + T * tpx - L) / px)))
+                r0, r1 = max(0, int(math.floor((Tt - ty1) / px))), min(H, int(math.ceil((Tt - (ty1 - T * tpx)) / px)))
+                if c1 <= c0 or r1 <= r0:
+                    return None
+                async with _sem:
+                    ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
+                a = np.asarray(np.ma.filled(ra.as_masked(), 0)).reshape(r1 - r0, c1 - c0)
+                cols = np.floor((xs - (L + c0 * px)) / px).astype(np.int64)
+                rows = np.floor(((Tt - r0 * px) - ys) / px).astype(np.int64)
+                okc, okr = (cols >= 0) & (cols < c1 - c0), (rows >= 0) & (rows < r1 - r0)
+                v = a[np.clip(rows, 0, r1 - r0 - 1)[:, None], np.clip(cols, 0, c1 - c0 - 1)[None, :]]
+                return np.where(okr[:, None] & okc[None, :], v, 0)
+
+            ub = sorted(set(bands))
+            got = await asyncio.gather(*(_read_band(i, b) for i in ids for b in ub))
+
+            def _composite_bands():
+                out = np.zeros((T, T, 4), np.uint8)
+                painted = []
+                for k, iid in enumerate(ids):
+                    per = dict(zip(ub, got[k * len(ub):(k + 1) * len(ub)]))
+                    if any(per[b] is None for b in ub):
+                        painted.append(0)
+                        continue
+                    rgb = np.stack([np.clip(255.0 * per[b] / max(scale.get(b, 3000.0), 1.0), 0, 255) for b in bands], -1).astype(np.uint8)
+                    valid = np.all([per[b] > 0 for b in ub], 0) & (out[..., 3] == 0)
+                    out[valid, :3] = rgb[valid]
+                    out[valid, 3] = 255
+                    painted.append(int(valid.sum()))
+                return out, painted
+
+            out, painted = await cpu(_composite_bands)
+            if not out[..., 3].any():
+                _tstat["blank"] += 1
+                _png[key] = None
+                _arr[akey] = None
+                return None
+            _arr[akey] = out
+            if len(_arr) > 2000:
+                _arr.pop(next(iter(_arr)))
+            png = await _encode(key, out)
+            _tstat["served"] += 1
+            _tstat["ms"] += 1000 * (time.time() - t0)
+            return png
+
+        # all the footprints at once (the round trips overlap), painted in
+        # their order after (first to paint a pixel wins, yearly before fill)
+        reads = await asyncio.gather(*(_read(i) for i in ids))
+
+        def _composite():
+            out = np.zeros((T, T, 4), np.uint8)
+            painted = []
+            for rd in reads:
+                if rd is None:
+                    painted.append(0)
+                    continue
+                ra, c0, r0, h, w, px, L, Tt = rd
+                a = np.asarray(np.ma.filled(ra.as_masked(), 0)).reshape(-1, h, w)[:3]
+                cols = np.floor((xs - (L + c0 * px)) / px).astype(np.int64)
+                rows = np.floor(((Tt - r0 * px) - ys) / px).astype(np.int64)
+                okc, okr = (cols >= 0) & (cols < w), (rows >= 0) & (rows < h)
+                rgb = a[:, np.clip(rows, 0, h - 1)[:, None], np.clip(cols, 0, w - 1)[None, :]].transpose(1, 2, 0)
+                valid = okr[:, None] & okc[None, :] & (rgb.sum(2) > 0) & (out[..., 3] == 0)
+                out[valid, :3] = rgb[valid]
+                out[valid, 3] = 255
+                painted.append(int(valid.sum()))
+            return out, painted
+
+        out, painted = await cpu(_composite)
+        fy = _fill.setdefault(year, [0, 0])
+        for iid, n_new in zip(ids, painted):
+            fy[1] += n_new
+            if _items[iid].get("fill"):
+                fy[0] += n_new
+        if not out[..., 3].any():
+            _tstat["blank"] += 1
+            _png[key] = None
+            _arr[akey] = None
+            return None
+        _arr[akey] = out
+        if len(_arr) > 2000:
+            _arr.pop(next(iter(_arr)))
+        png = await _encode(key, out)
+        _tstat["served"] += 1
+        _tstat["ms"] += 1000 * (time.time() - t0)
+        return png
+
+    async def s2_items_json(z, x, y, year):
+        """The year's footprints under Web Mercator tile (z, x, y), for the browser to read
+        itself (deck.gl-raster): JSON bytes, a list of {id, url of its TCI COG, bbox, fill},
+        yearly first. The same STAC search (and the same fallback when the STAC lags) as
+        the kernel's own tiles."""
+        ids = await _s2_items(_tile_ll(z, x, y), year)
+        return json.dumps([{"id": i, "url": "https://data.source.coop/" + _items[i]["tci"], "bbox": _items[i].get("bbox"),
+                            "fill": bool(_items[i].get("fill"))} for i in ids]).encode()
+
+    def s2_set_scale(v):
+        """The header's `gamma`: the curve the next S2 tiles are encoded with.
+        Returns True when it changed (the caller then re-asks deck for the tiles)."""
+        v = float(min(4.0, max(0.1, v)))
+        if v == _gain["v"]:
+            return False
+        _gain["v"] = v
+        return True
+
+    def s2_raster_stats():
+        """The tile counters, plus `fill`: for each year whose served tiles took
+        any pixels from S2_FILL_COLLECTION, the share of painted pixels that did
+        (over every tile served so far, not the view)."""
+        fill = {y: f / p for y, (f, p) in _fill.items() if f and p}
+        return dict(_tstat, cached=len(_png), scale=_gain["v"], fill=fill)
+
+    return S2_COMPOSITES, s2_items_json, s2_raster_stats, s2_set_composite, s2_set_scale, s2_tile_png
+
+
+@app.cell
+def _(Image, ObjectStore, RASTER_TILE, S3_OPTS, asyncio, cpu, io, math, np, source_coop, zarr):
+    # ---- WSF Tracker: the context at every zoom (the atlas notebook's reader) ----
+    # One GeoZarr on Source Cooperative, int8 per 10 m pixel: 0 never built-up,
+    # k = 1..20 the half-year it first read as built-up (1 = by 2016-07-01,
+    # 2 = July to December 2016, .., 20 = July to December 2025). Levels 1..12
+    # are a min pyramid: drawn, never folded. The grid is plate carree, so a
+    # lon/lat box is a window. The tiles carry the index itself in red, opaque
+    # where built-up, so the browser colors "built by year Y" for any Y
+    # without asking again.
+    WSF_PREFIX = "mindearth/wsf/World_WSF_20160701-20260101.zarr"
+    WSF_RES, WSF_X0, WSF_Y0 = 8.983152841195216e-05, -180.00001488697754, 78.0100585990529
+    WSF_LEVELS = 13
+    WSF_NIDX = 20
+    _store = source_coop(WSF_PREFIX, **S3_OPTS)
+    _root = zarr.open_group(ObjectStore(_store, read_only=True), mode="r")
+    _arr = {k: _root[str(k)]["wsf_tracker"] for k in range(WSF_LEVELS)}
+    _win = {}
+    _sem = asyncio.Semaphore(6)
+    _png_cache = {}
+    _rawmap = np.zeros((256, 4), np.uint8)
+    for _k in range(1, WSF_NIDX + 1):
+        _rawmap[_k] = (_k, 0, 0, 255)
+
+    def wsf_label(k):
+        """A half-year index in words."""
+        k = int(k)
+        if k <= 0:
+            return "never"
+        if k == 1:
+            return "by mid 2016"
+        return f"{2016 + (k - 1) // 2} {'Jan to Jun' if k % 2 else 'Jul to Dec'}"
+
+    def _px(k):
+        return WSF_RES * (2 ** k)
+
+    def _window_ix(k, box):
+        W_, S_, E_, N_ = box
+        px = _px(k)
+        H, W = _arr[k].shape
+        c0, c1 = max(0, int(math.floor((W_ - WSF_X0) / px))), min(W, int(math.ceil((E_ - WSF_X0) / px)))
+        r0, r1 = max(0, int(math.floor((WSF_Y0 - N_) / px))), min(H, int(math.ceil((WSF_Y0 - S_) / px)))
+        return c0, c1, r0, r1, px
+
+    async def wsf_window(k, box, stride=1):
+        """The level-k pixels under the box: (int8 (h, w), lon of the columns,
+        lat of the rows) or None. zarr's sync read runs in a thread."""
+        c0, c1, r0, r1, px = _window_ix(k, box)
+        if c1 <= c0 or r1 <= r0:
+            return None
+        key = (k, stride, r0, r1, c0, c1)
+        a = _win.get(key)
+        if a is None:
+            loop = asyncio.get_running_loop()
+            async with _sem:
+                a = await loop.run_in_executor(None, lambda: np.asarray(_arr[k][r0:r1:stride, c0:c1:stride]))
+            _win[key] = a
+            if len(_win) > 64:
+                _win.pop(next(iter(_win)))
+        lon = WSF_X0 + (c0 + stride * np.arange(a.shape[1]) + 0.5) * px
+        lat = WSF_Y0 - (r0 + stride * np.arange(a.shape[0]) + 0.5) * px
+        return a, lon, lat
+
+    def _wsf_png(got, k, n, y, lon0, lon1):
+        T = RASTER_TILE
+        arr, lon, lat = got
+        ys = np.pi * (1 - 2 * (y + (np.arange(T) + 0.5) / T) / n)
+        lat_c = np.degrees(np.arctan(np.sinh(ys)))
+        lon_c = lon0 + (np.arange(T) + 0.5) * (lon1 - lon0) / T
+        px = _px(k)
+        ci = np.floor((lon_c - (lon[0] - px / 2)) / px).astype(np.int64)
+        ri = np.floor(((lat[0] + px / 2) - lat_c) / px).astype(np.int64)
+        okc, okr = (ci >= 0) & (ci < arr.shape[1]), (ri >= 0) & (ri < arr.shape[0])
+        pxv = arr[np.clip(ri, 0, arr.shape[0] - 1)[:, None], np.clip(ci, 0, arr.shape[1] - 1)[None, :]]
+        pxv = np.where(okr[:, None] & okc[None, :], pxv, 0)
+        rgba = _rawmap[pxv.astype(np.uint8)]
+        if not rgba[..., 3].any():
+            return None
+        buf = io.BytesIO()
+        Image.fromarray(np.ascontiguousarray(rgba), mode="RGBA").save(buf, format="PNG")
+        return buf.getvalue()
+
+    async def wsf_tile_png(z, x, y):
+        """PNG bytes for Web Mercator tile (z, x, y), the half-year index in
+        red, or None where nothing is built. The level is the one whose pixel
+        is nearest the tile's own (in meters at the tile's latitude)."""
+        key = (z, x, y)
+        if key in _png_cache:
+            return _png_cache[key]
+        T = RASTER_TILE
+        n = 2 ** z
+        lon0, lon1 = x / n * 360 - 180, (x + 1) / n * 360 - 180
+        lat1 = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
+        lat0 = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
+        if lat1 < -60.01 or lat0 > 78.01:
+            _png_cache[key] = None
+            return None
+        m_tile = 2 * math.pi * 6378137.0 / (n * T) * math.cos(math.radians((lat0 + lat1) / 2))
+        k = max(0, min(WSF_LEVELS - 1, int(round(math.log2(max(m_tile, 10.0) / 10.0)))))
+        got = await wsf_window(k, (lon0, lat0, lon1, lat1))
+        if got is None:
+            _png_cache[key] = None
+            return None
+        _png_cache[key] = await cpu(_wsf_png, got, k, n, y, lon0, lon1)
+        if len(_png_cache) > 4000:
+            _png_cache.pop(next(iter(_png_cache)))
+        return _png_cache[key]
+
+    async def wsf_on_grid(west, north, res, h, w):
+        """WSF level 0 at every pixel center of a lon/lat grid (the AEF
+        mosaic's), nearest: the two grids are both about 10 m. Also the native
+        window and its origin, for joins at WSF's own resolution."""
+        lon = west + (np.arange(w) + 0.5) * res
+        lat = north - (np.arange(h) + 0.5) * res
+        got = await wsf_window(0, (lon[0] - res, lat[-1] - res, lon[-1] + res, lat[0] + res))
+        if got is None:
+            return np.zeros((h, w), np.uint8)
+        a, wl, wt = got
+        cols = np.clip(np.floor((lon - (wl[0] - WSF_RES / 2)) / WSF_RES).astype(np.int64), 0, a.shape[1] - 1)
+        rows = np.clip(np.floor(((wt[0] + WSF_RES / 2) - lat) / WSF_RES).astype(np.int64), 0, a.shape[0] - 1)
+        return a[np.ix_(rows, cols)].astype(np.uint8)
+
+    return WSF_NIDX, wsf_label, wsf_on_grid, wsf_tile_png
+
+
+@app.cell
+def _(AEF_NODATA, OV_RELEASE, aef_window, asyncio, change_resolution, json, math, np, os, pa, time, urllib, wsf_on_grid):
+    # ---- THE SHARED MODELS, per 10 m pixel, kept in H3 res 13 for the session ----
+    # Taught on the downloaded sites of embeddings-built-up (training/), run here
+    # on the view. On every 10 m pixel:
+    #  - the structure reading: a logistic on the pixel's 64 AEF values and their
+    #    3 x 3 mean (taught at nine sites; one whole site left out it scored AUC
+    #    0.946 on average) gives the chance a structure stands on or touches it,
+    #  - the bare ground codes from it: standing (50% or more), and flat (under
+    #    20%) in a city (10% or more of the 61 x 61 px around stands), at an edge,
+    #    or bare (under 2% stands),
+    #  - All built, seven classes: the pooled logistic (eight sites) on the same
+    #    128 values and three from the reading, stacked with a logistic fit on the
+    #    view's own live teachers (training/height_clean.py's teachers built live:
+    #    Overture roads buffered by class and footprints, WSF built-up away from
+    #    both, Impact Observatory's natural classes steady 2021 to 2023, open land
+    #    use as free ground). The teachers describe now, so they teach 2025.
+    # Per pixel then fold: on eight sites (experiments/hex_vs_pixel.py) it named
+    # the classes best at res 9 to 12. Each answer goes to the H3 res 13 cells
+    # whose center falls in the pixel; a hexagon at any res is a group-by of
+    # those, so the zooms agree. The store holds only the view the model last
+    # ran on (memory), for the session only.
+    import shapely as _shp
+    from h3ronpy.vector import cells_to_coordinates as _c2xy, wkb_to_cells as _wkb2cells
+    from scipy.ndimage import binary_dilation as _dilate, uniform_filter as _uf
+
+    OTF_CLASSES = ["water", "forest", "grassland", "desert", "other built-up", "road", "building"]
+    OTF_BUILT = (4, 5, 6)
+    OTF_GROUND = {1: "standing", 2: "flat in a city", 3: "flat at an edge", 4: "bare", 5: "unsure"}
+    OTF_TEACH_YEAR = 2025
+    _STAND, _FLAT, _CITY, _BARE, _WINPX, _PAD = 0.5, 0.2, 0.10, 0.02, 61, 30
+    _N_LIVE, _MIN_CLASS, _BLOCK, _ROWS = 1000, 100, 32, 256
+    _ROAD_HALF_M = {"motorway": 15, "trunk": 12, "primary": 10, "secondary": 8, "tertiary": 6,
+                    "unclassified": 5, "residential": 5, "living_street": 4, "service": 3, "unknown": 4}
+    _OPEN_SUB = ("park", "cemetery", "golf", "protected")
+    _OPEN_CLS = ("pitch", "track", "playground", "recreation_ground", "dog_park", "village_green", "grass",
+                 "meadow", "garden", "allotments", "flowerbed")
+    _IO_TO = {1: 0, 2: 1, 4: 2, 5: 2, 11: 2, 8: 3}
+    _IO_NAMES = {1: "water", 2: "trees", 4: "flooded vegetation", 5: "crops", 7: "built area", 8: "bare ground",
+                 9: "snow or ice", 10: "clouds", 11: "rangeland"}
+    _WC_URL = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_{}_Map.tif"
+    _WC_TO_IO = {10: 2, 20: 11, 30: 11, 40: 5, 50: 7, 60: 8, 70: 9, 80: 1, 90: 4, 95: 4, 100: 11}
+    # Overture's tiles: the pinned release while its tiles answer, else the latest in its STAC
+    IO_S3 = "https://s3.us-west-2.amazonaws.com/io-10m-annual-lulc"
+    _OV_TILES, _OV_STAC, _OV_PIN = "https://tiles.overturemaps.org", "https://stac.overturemaps.org/catalog.json", OV_RELEASE
+
+    _here = None
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        pass
+
+    def _load_model(name):
+        p = os.path.join(_here or ".", "models", name)
+        if os.path.exists(p):
+            with open(p) as f:
+                return json.load(f)
+        with urllib.request.urlopen("https://raw.githubusercontent.com/kentstephen/embeddings-on-the-fly/main/models/" + name, timeout=30) as r:
+            return json.loads(r.read())
+
+    _S = _load_model("structure_reading_logreg128.json")
+    _M = _load_model("all_built_pooled_logit_read.json")
+    _S_mu, _S_sd = np.asarray(_S["standardize"]["mean"], np.float32), np.asarray(_S["standardize"]["scale"], np.float32)
+    _S_w = np.asarray(_S["coef"], np.float32)
+    _M_mu, _M_sd = np.asarray(_M["standardize"]["mean"], np.float32), np.asarray(_M["standardize"]["scale"], np.float32)
+    _M_w, _M_b = np.asarray(_M["coef"], np.float32), np.asarray(_M["intercept"], np.float32)
+
+    def _deq(q):
+        v = q.astype(np.float32)
+        v = np.sign(v) * (v / 127.5) ** 2
+        v[q == AEF_NODATA] = 0
+        return v
+
+    def _feats_rows(q, r0, r1):
+        """Rows r0..r1 of the grid: (rows * w, 128), the 64 values and their
+        3 x 3 mean (nodata as 0, as in training), and which have AEF."""
+        lo, hi = max(r0 - 1, 0), min(r1 + 1, q.shape[1])
+        v = _deq(q[:, lo:hi])
+        m = _uf(v, size=(1, 3, 3), mode="nearest")
+        sl = slice(r0 - lo, r0 - lo + (r1 - r0))
+        X = np.concatenate([v[:, sl].reshape(64, -1).T, m[:, sl].reshape(64, -1).T], 1)
+        return X, (q[0, r0:r1] != AEF_NODATA).ravel()
+
+    def _pooled(XR):
+        z = (XR - _M_mu) / _M_sd
+        L = z @ _M_w.T + _M_b
+        L -= L.max(1, keepdims=True)
+        e = np.exp(L)
+        P = np.zeros((len(XR), 7), np.float32)
+        P[:, _M["model_classes"]] = e / e.sum(1, keepdims=True)
+        return P
+
+    def _logit(X, y):
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+        return make_pipeline(StandardScaler(), LogisticRegression(C=1.0, max_iter=1000)).fit(X, y)
+
+    def _proba(m, X):
+        P = np.zeros((len(X), 7), np.float32)
+        P[:, m.classes_] = m.predict_proba(X)
+        return P
+
+    # ---- the live teachers' reads ----------------------------------------------
+    _OV = {}
+
+    def _ov_release():
+        import requests
+        if "rel" not in _OV:
+            rel = _OV_PIN
+            try:
+                r = requests.get(f"{_OV_TILES}/{rel}/buildings.pmtiles", headers={"Range": "bytes=0-126"}, timeout=15)
+                r.raise_for_status()
+            except Exception:
+                rel = requests.get(_OV_STAC, timeout=20).json()["latest"]
+            _OV["rel"] = rel
+        return _OV["rel"]
+
+    def _ov_features(theme, layers, box):
+        """Every feature of the layers in the theme's deepest tiles over the box:
+        (layer, properties, shapely geometry in lon/lat); a feature crossing tiles
+        comes once per tile, clipped."""
+        import gzip
+        import requests
+        from concurrent.futures import ThreadPoolExecutor
+        import mapbox_vector_tile
+        from pmtiles.reader import Reader
+        key = "pm_" + theme
+        if key not in _OV:
+            url, sess = f"{_OV_TILES}/{_ov_release()}/{theme}.pmtiles", requests.Session()
+
+            def get(o, n):
+                r = sess.get(url, headers={"Range": f"bytes={o}-{o + n - 1}"}, timeout=30)
+                r.raise_for_status()
+                return r.content
+
+            rd = Reader(get)
+            _OV[key] = (rd, rd.header()["max_zoom"])
+        rd, z = _OV[key]
+        n = 2 ** z
+        tx = lambda lon: int((lon + 180) / 360 * n)  # noqa: E731
+        ty = lambda lat: int((1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n)  # noqa: E731
+        W_, S_, E_, N_ = box
+        tiles = [(x, y) for x in range(tx(W_), tx(E_) + 1) for y in range(ty(N_), ty(S_) + 1)]
+
+        def one(xy):
+            x, y = xy
+            d = rd.get(z, x, y)
+            if not d:
+                return []
+            if d[:2] == b"\x1f\x8b":
+                d = gzip.decompress(d)
+            dec = mapbox_vector_tile.decode(d, default_options={"y_coord_down": True})
+            out = []
+            for ln in layers:
+                lay = dec.get(ln)
+                if not lay:
+                    continue
+                ext = lay.get("extent", 4096)
+
+                def ll(a, x=x, y=y, ext=ext):
+                    lon = (x + a[:, 0] / ext) / n * 360 - 180
+                    lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + a[:, 1] / ext) / n))))
+                    return np.column_stack([lon, lat])
+
+                for f in lay["features"]:
+                    try:
+                        out.append((ln, f["properties"], _shp.transform(_shp.geometry.shape(f["geometry"]), ll)))
+                    except Exception:
+                        continue
+            return out
+
+        with ThreadPoolExecutor(16) as ex:
+            return [f for part in ex.map(one, tiles) for f in part]
+
+    def _overture(box):
+        from concurrent.futures import ThreadPoolExecutor
+        bx = _shp.box(*box)
+        with ThreadPoolExecutor(3) as ex:
+            fb = ex.submit(_ov_features, "buildings", ["building"], box)
+            ft = ex.submit(_ov_features, "transportation", ["segment"], box)
+            fs = ex.submit(_ov_features, "base", ["land_use", "water"], box)
+            fb, ft, fs = fb.result(), ft.result(), fs.result()
+        pieces = {}
+        for _, pr, g in fb:
+            if g.geom_type in ("Polygon", "MultiPolygon") and g.intersects(bx):
+                pieces.setdefault(pr.get("id"), []).append(g)
+        bld = [_shp.union_all(v) if len(v) > 1 else v[0] for v in pieces.values()]
+        roads = [(pr.get("class"), g) for _, pr, g in ft if pr.get("subtype") == "road" and pr.get("class") in _ROAD_HALF_M
+                 and g.geom_type.endswith("LineString")]
+        opn = [g for ln, pr, g in fs if ln == "land_use" and g.geom_type.endswith("Polygon")
+               and (pr.get("subtype") in _OPEN_SUB or pr.get("class") in _OPEN_CLS) and "water" not in str(pr.get("class"))]
+        return bld, roads, opn, _ov_release()
+
+    def _warp(href, tr, h, w):
+        import rasterio
+        from rasterio.enums import Resampling
+        from rasterio.vrt import WarpedVRT
+        with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_HTTP_MAX_RETRY="4", GDAL_HTTP_RETRY_DELAY="2"):
+            with rasterio.open(href) as src, WarpedVRT(src, crs="EPSG:4326", transform=tr, width=w, height=h,
+                                                       resampling=Resampling.nearest, src_nodata=0, nodata=0) as vrt:
+                return vrt.read(1)
+
+    def _landcover(box, tr, h, w):
+        """IO class per pixel (2023), steady 2021 to 2023, and the source; ESA
+        WorldCover 2021 (one year, no steadiness test) when Impact Observatory
+        cannot be read. Impact Observatory from its AWS open data bucket
+        (s3://io-10m-annual-lulc, the same maps as Planetary Computer's
+        io-lulc-annual-v02, pixel for pixel): one COG per UTM zone and latitude
+        band a year, so no search and no token, every file warped side by side."""
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            W_, S_, E_, N_ = box
+            bands = "CDEFGHJKLMNPQRSTUVWX"  # 8 degrees each from 80 S (X, the last, is 12)
+            band = lambda la: bands[min(19, max(0, int((la + 80) // 8)))]  # noqa: E731
+            zones = range(int((W_ + 180) // 6) + 1, int((E_ + 180) // 6) + 2)
+            lets = sorted({band(S_), band(N_)} | {band(la) for la in np.arange(S_, N_, 8.0)})
+            todo = [(yr, f"{IO_S3}/{z:02d}{b}_{yr}.tif") for yr in (2021, 2022, 2023) for z in zones for b in lets]
+
+            def one(it):
+                # a zone and band with no file (open sea) reads as nothing
+                try:
+                    return _warp(f"/vsicurl/{it[1]}", tr, h, w)
+                except Exception:
+                    return np.zeros((h, w), np.uint8)
+
+            with ThreadPoolExecutor(max(1, min(8, len(todo)))) as ex:
+                warped = list(ex.map(one, todo))
+            lc = {}
+            for yr in (2021, 2022, 2023):
+                m = np.zeros((h, w), np.uint8)
+                for (y_, _), a in zip(todo, warped):
+                    if y_ == yr:
+                        m = np.where(m == 0, a, m)
+                lc[yr] = m
+            if not lc[2023].any():
+                raise RuntimeError("no IO 2023 here")
+            return lc[2023], (lc[2021] == lc[2023]) & (lc[2022] == lc[2023]), "Impact Observatory 2023, steady 2021 to 2023"
+        except Exception as ex:
+            why = f"{type(ex).__name__}"
+        W_, S_, E_, N_ = box
+        m = np.zeros((h, w), np.uint8)
+        for la in range(int(math.floor(S_ / 3) * 3), int(math.floor(N_ / 3) * 3) + 1, 3):
+            for lo in range(int(math.floor(W_ / 3) * 3), int(math.floor(E_ / 3) * 3) + 1, 3):
+                nm = f"{'N' if la >= 0 else 'S'}{abs(la):02d}{'E' if lo >= 0 else 'W'}{abs(lo):03d}"
+                try:
+                    m = np.where(m == 0, _warp(f"/vsicurl/{_WC_URL.format(nm)}", tr, h, w), m)
+                except Exception:
+                    continue
+        io_ = np.zeros_like(m)
+        for wc, code in _WC_TO_IO.items():
+            io_[m == wc] = code
+        return io_, np.ones(m.shape, bool), f"ESA WorldCover 2021 (Impact Observatory: {why})"
+
+    def _burn(geoms, tr, h, w):
+        from rasterio.features import rasterize
+        geoms = [g for g in geoms if g is not None and not g.is_empty]
+        if not geoms:
+            return np.zeros((h, w), bool)
+        return rasterize(((g, 1) for g in geoms), out_shape=(h, w), transform=tr, fill=0, dtype=np.uint8).astype(bool)
+
+    def _teachers(bld, roads, opn, wsf, lc, steady, tr, h, w, lat):
+        """training/height_clean.py's labels: 0..6 per pixel, -1 none."""
+        kx, ky = 111_320.0 * math.cos(math.radians(lat)), 110_574.0
+        rp = []
+        if roads:
+            cls = np.array([c for c, _ in roads], dtype=object)
+            rg = np.array([g for _, g in roads], dtype=object)
+            rp = _shp.transform(_shp.buffer(_shp.transform(rg, lambda a: a * [kx, ky]), np.array([_ROAD_HALF_M[c] for c in cls], float),
+                                             cap_style="flat"), lambda a: a / [kx, ky])
+        road, bldg, open_ = _burn(rp, tr, h, w), _burn(bld, tr, h, w), _burn(opn, tr, h, w)
+        near = _dilate(road | bldg, iterations=1)
+        built = wsf > 0
+        k = np.full((h, w), -1, np.int8)
+        k[~built & ~near] = 0
+        k[built & ~near] = 3
+        k[open_ & ~near & (lc != 1)] = 4
+        lab = np.full((h, w), -1, np.int8)
+        lab[k == 3] = 4
+        lab[road] = 5
+        lab[bldg] = 6
+        free = (k == 0) | (k == 4)
+        for code, c in _IO_TO.items():
+            lab[free & steady & (lc == code)] = c
+        return lab, bldg
+
+    # ---- the session store: one row per res 13 cell ---------------------------
+    STORE = {"years": {}, "fixed": None, "boxes": [], "par": {}, "info": [], "ver": 0}
+
+    def otf_covered(view, years):
+        """Whether the store already holds these years over this box."""
+        ys = set(years) | {OTF_TEACH_YEAR}
+        for b, yy in STORE["boxes"]:
+            if ys <= yy and b[0] <= view[0] and b[1] <= view[1] and b[2] >= view[2] and b[3] >= view[3]:
+                return True
+        return False
+
+    async def otf_run(view, years, say=lambda m: None):
+        """The models over the box (lon/lat W, S, E, N) for the years, into the store."""
+        t0 = time.time()
+        years = sorted(set(int(y) for y in years) | {OTF_TEACH_YEAR})
+        r_ = 8.983111749910169e-05
+        pad = _PAD * r_
+        box = (view[0] - pad, view[1] - pad, view[2] + pad, view[3] + pad)
+        # every AlphaEarth year read at once, from the start (the teaching year first in line), so the
+        # other years arrive while the teachers are read and the fit runs; any still reading when the
+        # run ends or is cancelled are cancelled with it
+        _aef = {y: asyncio.ensure_future(aef_window(box, y)) for y in [OTF_TEACH_YEAR] + [y for y in years if y != OTF_TEACH_YEAR]}
+        asyncio.current_task().add_done_callback(lambda _t: [f.cancel() for f in _aef.values() if not f.done()])
+        got = await _aef[OTF_TEACH_YEAR]
+        if got is None:
+            return None
+        q_last, west, north, res = got
+        h, w = q_last.shape[1:]
+        from rasterio.transform import Affine
+        tr = Affine(res, 0, west, 0, -res, north)
+        lat = north - h * res / 2
+        say("the model: reading WSF, Overture and Impact Observatory for the teachers…")
+        wsf, (bld, roads, opn, rel), (lc, steady, lc_src) = await asyncio.gather(
+            wsf_on_grid(west, north, res, h, w),
+            asyncio.to_thread(_overture, box),
+            asyncio.to_thread(_landcover, box, tr, h, w))
+        lab, bldg = await asyncio.to_thread(_teachers, bld, roads, opn, wsf, lc, steady, tr, h, w, lat)
+        t_read = time.time() - t0
+
+        def reading(q):
+            p = np.full(h * w, np.nan, np.float32)
+            for r0 in range(0, h, _ROWS):
+                X, ok = _feats_rows(q, r0, min(h, r0 + _ROWS))
+                z = (X - _S_mu) / _S_sd
+                pr = 1 / (1 + np.exp(-(z @ _S_w + _S["intercept"])))
+                p[r0 * w:r0 * w + len(pr)] = np.where(ok, pr, np.nan)
+            p = p.reshape(h, w)
+            ok = np.isfinite(p)
+            pf = np.where(ok, p, 0).astype(np.float32)
+            R = np.stack([pf, _uf(pf, size=3, mode="nearest"), _uf((ok & (pf >= _STAND)).astype(np.float32), size=_WINPX, mode="constant")], -1)
+            code = np.full((h, w), 5, np.uint8)
+            flat = ok & (pf < _FLAT)
+            dens = R[..., 2]
+            code[ok & (pf >= _STAND)] = 1
+            code[flat & (dens >= _CITY)] = 2
+            code[flat & (dens < _CITY) & (dens >= _BARE)] = 3
+            code[flat & (dens < _BARE)] = 4
+            code[~ok] = 255
+            return p, R.reshape(-1, 3), code
+
+        # the live fits, on the teaching year (scored on teachers held out by block)
+        def fits():
+            p, R, code = reading(q_last)
+            y = lab.ravel()
+            inner = np.zeros((h, w), bool)
+            inner[_PAD:-_PAD, _PAD:-_PAD] = True
+            y = np.where(inner.ravel() & np.isfinite(p.ravel()), y, -1)
+            counts = np.array([(y == c).sum() for c in range(7)])
+            present = [c for c in range(7) if counts[c] >= _MIN_CLASS]
+            prior = np.zeros(7, np.float32)
+            if present:
+                prior[present] = counts[present] / counts[present].sum()
+            rr, cc = np.divmod(np.arange(h * w), w)
+            blk = (rr // _BLOCK) * (w // _BLOCK + 1) + cc // _BLOCK
+            ids = np.unique(blk)
+            fold = (np.random.default_rng(0).permutation(len(ids)) % 5)[np.searchsorted(ids, blk)]
+            rng = np.random.default_rng(0)
+
+            def draw(mask, y=y, present=present):
+                parts = [rng.choice(np.flatnonzero(mask & (y == c)), min(_N_LIVE, int((mask & (y == c)).sum())), replace=False)
+                         for c in present if (mask & (y == c)).any()]
+                return np.concatenate(parts) if parts else np.zeros(0, np.int64)
+
+            def rows_of(i):
+                r, c = np.divmod(i, w)
+                v = _deq(q_last[:, r, c]).T
+                m = np.zeros_like(v)
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        m += _deq(q_last[:, np.clip(r + dr, 0, h - 1), np.clip(c + dc, 0, w - 1)]).T
+                X = np.hstack([v, m / 9, R[i]])
+                Ps = _pooled(X)
+                return X, Ps, np.log(np.clip(Ps, 1e-4, 1))
+
+            allp = draw(np.ones(h * w, bool))
+            if len(present) < 2 or len(allp) < 50:
+                return None, prior, present, None, counts, (p, R, code)
+            Xa, Pa, La = rows_of(allp)
+            # what the held-out scores need: they are worked out after the map has its answer
+            held = (Xa, Pa, La, fold[allp], y[allp])
+            return _logit(np.hstack([Xa, La]), y[allp]), prior, present, held, counts, (p, R, code)
+
+        def score(held, prior):
+            """The held-out scores, by block (5 folds): the shared model alone, and stacked."""
+            from sklearn.metrics import balanced_accuracy_score
+            Xa, Pa, La, fa, ya = held
+            scores, yt, out = {}, [], {"shared": [], "stacked": []}
+            for k in range(5):
+                tri, tei = np.flatnonzero(fa != k), np.flatnonzero(fa == k)
+                if len(tei) < 20 or len(set(ya[tri])) < 2:
+                    continue
+                m = _logit(np.hstack([Xa[tri], La[tri]]), ya[tri])
+                yt.append(ya[tei])
+                out["shared"].append((Pa[tei] * prior).argmax(1))
+                out["stacked"].append((_proba(m, np.hstack([Xa[tei], La[tei]])) * prior).argmax(1))
+            if yt:
+                yt = np.concatenate(yt)
+                for v in out:
+                    pv = np.concatenate(out[v])
+                    scores[v] = {"balanced accuracy": float(balanced_accuracy_score(yt, pv)),
+                                 "built vs natural": float(balanced_accuracy_score(np.isin(yt, OTF_BUILT), np.isin(pv, OTF_BUILT)))}
+            return scores
+
+        say("the model: fitting on the live teachers…")
+        stack, prior, present, held, counts, last_reading = await asyncio.to_thread(fits)
+        t_fit = time.time() - t0 - t_read
+
+        # res 13 cells of the view: each takes the pixel under its center
+        cl = pa.array(_wkb2cells(pa.array([_shp.to_wkb(_shp.box(*view))], pa.binary()), 13, flatten=True))
+        cells13 = np.sort(np.asarray(cl).astype(np.uint64))
+        xy = _c2xy(pa.array(cells13))
+        rr13 = np.floor((north - np.asarray(pa.array(xy.column("lat")))) / res).astype(np.int64)
+        cc13 = np.floor((np.asarray(pa.array(xy.column("lng"))) - west) / res).astype(np.int64)
+        ok13 = (rr13 >= 0) & (rr13 < h) & (cc13 >= 0) & (cc13 < w)
+        cells13, rr13, cc13 = cells13[ok13], rr13[ok13], cc13[ok13]
+        pix = rr13 * w + cc13
+
+        def apply(q, rd):
+            p, R, code = rd
+            P = np.zeros((len(pix), 7), np.uint8)
+            o = np.argsort(pix)
+            ps = pix[o]
+
+            # blocks of 64 rows side by side on threads (numpy lets go of the GIL), each writing its
+            # own rows of P
+            def block(r0):
+                r1 = min(h, r0 + 64)
+                a, b = np.searchsorted(ps, [r0 * w, r1 * w])
+                if a == b:
+                    return
+                X, ok = _feats_rows(q, r0, r1)
+                sel = ps[a:b] - r0 * w
+                Xs = np.hstack([X[sel], R[ps[a:b]]])
+                Ps = _pooled(Xs)
+                Pr = _proba(stack, np.hstack([Xs, np.log(np.clip(Ps, 1e-4, 1))])) if stack is not None else Ps
+                Pr = Pr * prior if prior.sum() > 0 else Pr
+                Pr = Pr / np.maximum(Pr.sum(1, keepdims=True), 1e-9)
+                Pr[~ok[sel]] = 0
+                P[o[a:b]] = np.round(255 * Pr).astype(np.uint8)
+
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(4) as ex:
+                list(ex.map(block, range(0, h, 64)))
+            s_ = np.where(np.isfinite(p.ravel()[pix]), np.round(100 * np.nan_to_num(p.ravel()[pix])), 255).astype(np.uint8)
+            return {"cell": cells13, "P": P, "s": s_, "c": code.ravel()[pix].astype(np.uint8)}
+
+        rows = {}
+        for y in years:
+            say(f"the model: reading AlphaEarth {y} at 10 m and running it…")
+            if y == OTF_TEACH_YEAR:
+                q, rd = q_last, last_reading
+            else:
+                g2 = await _aef[y]
+                if g2 is None or g2[0].shape != q_last.shape:
+                    continue
+                q = g2[0]
+                rd = await asyncio.to_thread(reading, q)
+            rows[y] = await asyncio.to_thread(apply, q, rd)
+        fixed = {"cell": cells13, "wsf": wsf.ravel()[pix], "lc": lc.ravel()[pix],
+                 "teach": np.where(lab.ravel()[pix] < 0, 255, lab.ravel()[pix].astype(np.int16)).astype(np.uint8),
+                 "bldg": bldg.ravel()[pix].astype(np.uint8)}
+        # only what is in view is kept (memory): each run replaces the store with its own view
+        STORE["years"] = dict(rows)
+        STORE["fixed"] = fixed
+        STORE["boxes"] = [(tuple(view), set(rows))]
+        STORE["par"] = {}
+        STORE["ver"] += 1
+        info = {"box": list(view), "years": sorted(rows), "scores": {}, "lc_source": lc_src, "overture": rel,
+                "teachers": {OTF_CLASSES[c]: int(counts[c]) for c in range(7) if counts[c]},
+                "left_out": [OTF_CLASSES[c] for c in range(7) if c not in present],
+                "cells": int(len(cells13)), "px": int(h * w),
+                "secs": {"reads": round(t_read, 1), "fit": round(t_fit, 1), "all": round(time.time() - t0, 1)}}
+        STORE["info"].append(info)
+        if held is not None:
+            async def _scores():
+                info["scores"] = await asyncio.to_thread(score, held, prior)
+            asyncio.ensure_future(_scores())
+        return info
+
+    def _parents(res):
+        """Each store row's parent at res (cached until the store changes)."""
+        f = STORE["fixed"]
+        if f is None:
+            return None
+        if res not in STORE["par"]:
+            STORE["par"][res] = f["cell"] if res >= 13 else pa.array(change_resolution(pa.array(f["cell"]), res)).to_numpy(zero_copy_only=False).astype(np.uint64)
+        return STORE["par"][res]
+
+    def otf_on_frame(cellid, res, years):
+        """Per hexagon of a frame, from the store: bytes for the map (class + 1,
+        built share, building share, structure %, ground code, first year built
+        - 2000, coverage), or None when the store has nothing here."""
+        f = STORE["fixed"]
+        n = len(cellid)
+        if f is None or not n:
+            return None
+        par = _parents(res)
+        pos = np.clip(np.searchsorted(cellid, par), 0, n - 1)
+        m = cellid[pos] == par
+        if not m.any():
+            return None
+        hix = pos[m]
+        cnt = np.bincount(hix, minlength=n).astype(np.float32)
+        # a year's rows line up with the fixed rows (same cells, both sorted) when
+        # it covers the same ground; otherwise matched by cell
+        def on_rows(t, col):
+            i = np.clip(np.searchsorted(t["cell"], f["cell"][m]), 0, len(t["cell"]) - 1)
+            hit = t["cell"][i] == f["cell"][m]
+            return t[col][i], hit
+        ys = [y for y in years if y in STORE["years"]] or sorted(STORE["years"])
+        out = np.zeros((n, 7), np.uint8)
+        first = np.zeros(n, np.uint8)
+        for y in ys:
+            P, hit = on_rows(STORE["years"][y], "P")
+            Pm = np.zeros((n, 7), np.float64)
+            for c in range(7):
+                Pm[:, c] = np.bincount(hix, weights=np.where(hit, P[:, c], 0).astype(np.float64), minlength=n)
+            nh = np.bincount(hix, weights=hit.astype(np.float64), minlength=n)
+            Pm /= np.maximum(nh, 1)[:, None] * 255
+            built = Pm[:, list(OTF_BUILT)].sum(1)
+            first = np.where((first == 0) & (built >= 0.5) & (nh > 0), y - 2000, first).astype(np.uint8)
+            if y == ys[-1]:
+                cls_ = np.where(nh > 0, Pm.argmax(1) + 1, 0)
+                S_, hs = on_rows(STORE["years"][y], "s")
+                C_, _ = on_rows(STORE["years"][y], "c")
+                sv = (S_ != 255) & hs
+                smean = np.bincount(hix, weights=np.where(sv, S_, 0).astype(np.float64), minlength=n) / np.maximum(np.bincount(hix, weights=sv.astype(np.float64), minlength=n), 1)
+                gc = np.zeros((n, 6))
+                for k in range(1, 6):
+                    gc[:, k] = np.bincount(hix, weights=((C_ == k) & hs).astype(np.float64), minlength=n)
+                out[:, 0] = cls_
+                out[:, 1] = np.round(255 * np.clip(built, 0, 1))
+                out[:, 2] = np.round(255 * np.clip(Pm[:, 6], 0, 1))
+                out[:, 3] = np.where(nh > 0, np.round(smean), 255)
+                out[:, 4] = np.where(gc.sum(1) > 0, gc.argmax(1), 0)
+        out[:, 5] = first
+        # coverage: the share of a hexagon's res 13 cells the store holds
+        full = 7.0 ** max(0, 13 - res)
+        out[:, 6] = np.round(255 * np.clip(cnt / full, 0, 1))
+        return out
+
+    def otf_card(cellid_hex, res, years):
+        """The model's account of one hexagon, from its res 13 rows."""
+        f = STORE["fixed"]
+        if f is None:
+            return None
+        cell = np.uint64(int(cellid_hex, 16))
+        par = _parents(res)
+        m = par == cell
+        if not m.any():
+            return None
+        out = {"cells": int(m.sum()), "years": []}
+        for y in sorted(STORE["years"]):
+            t = STORE["years"][y]
+            i = np.clip(np.searchsorted(t["cell"], f["cell"][m]), 0, len(t["cell"]) - 1)
+            hit = t["cell"][i] == f["cell"][m]
+            if not hit.any():
+                continue
+            P = t["P"][i[hit]].astype(np.float64).mean(0) / 255
+            s_ = t["s"][i[hit]]
+            c_ = t["c"][i[hit]]
+            out["years"].append({"year": int(y), "shares": [round(float(v), 3) for v in P],
+                                 "structure": None if (s_ == 255).all() else round(float(s_[s_ != 255].mean()), 1),
+                                 "ground": [round(float((c_ == k).mean()), 3) for k in range(1, 6)]})
+        wv = f["wsf"][m]
+        built = wv[wv > 0]
+        out["wsf_built"] = round(float((wv > 0).mean()), 3)
+        out["wsf_half"] = int(np.sort(built)[len(built) // 2]) if len(built) else 0
+        lv = f["lc"][m]
+        out["landcover"] = _IO_NAMES.get(int(np.bincount(lv, minlength=12).argmax()), "none") if len(lv) else "none"
+        out["footprint"] = round(float(f["bldg"][m].mean()), 3)
+        tv = f["teach"][m]
+        out["teachers"] = {OTF_CLASSES[c]: int((tv == c).sum()) for c in range(7) if (tv == c).any()}
+        out["info"] = STORE["info"][-1] if STORE["info"] else None
+        return out
+
+    return OTF_CLASSES, OTF_GROUND, STORE, otf_card, otf_covered, otf_on_frame, otf_run
+
+
+@app.cell
+def _(duckdb):
+    # ---- DuckDB: the frame's join and the tables under the map --------------
+    con = duckdb.connect()
+    return (con,)
+
+
+@app.cell
+def _(ADMIN_PQ, HOME, duckdb):
+    # ---- the place under a click: one point query against fused/overture ------
+    # Overture's divisions theme as Fused geo-partitions it on Source
+    # Cooperative, 79 GeoParquet files per type, each row with a bbox struct.
+    # division_area says which polygons hold the point: country, region,
+    # county, localadmin, locality, every level Overture draws, anywhere.
+    # division, joined on the ids, adds local_type, the country's own word for
+    # the level (city, town, village, prefecture, governorate, state). DuckDB
+    # reads the footers, keeps the row groups whose bbox stats can hold the
+    # point, and runs ST_Contains on what is left. Its own connection, a
+    # cursor per call so a click and the warm-up can overlap, the object cache
+    # on so the footers are read once: 7 s cold, 1 to 3 s after.
+    import threading as _th
+
+    _dv = {"con": None, "err": None}
+    _lock = _th.Lock()
+    _AREA = f"{ADMIN_PQ}/type=division_area/*.parquet"
+    _DIV = f"{ADMIN_PQ}/type=division/*.parquet"
+    _ORDER = {"locality": 0, "localadmin": 1, "county": 2, "region": 3, "country": 4}
+
+    def _connect():
+        with _lock:
+            if _dv["con"] is None and _dv["err"] is None:
+                try:
+                    c = duckdb.connect()
+                    for ext in ("spatial", "httpfs"):
+                        try:
+                            c.execute(f"LOAD {ext}")
+                        except Exception:
+                            c.execute(f"INSTALL {ext}; LOAD {ext}")
+                    # Source Cooperative's proxy (see source_coop): its S3 API,
+                    # path-style, the account as the bucket, nothing to sign with.
+                    # GLOBAL, because a cursor is its own session and a plain
+                    # SET would not reach it
+                    c.execute("SET GLOBAL s3_endpoint='data.source.coop'; SET GLOBAL s3_url_style='path'; SET GLOBAL s3_use_ssl=true; "
+                              "SET GLOBAL s3_region='us-west-2'; SET GLOBAL enable_object_cache=true")
+                    _dv["con"] = c
+                except Exception as e:
+                    _dv["err"] = e
+            return _dv["con"]
+
+    _Q_AREA = (
+        "SELECT subtype, names.primary, names.common['en'], country, division_id "
+        f"FROM read_parquet('{_AREA}', hive_partitioning=0) "
+        "WHERE bbox.xmin <= $x AND bbox.xmax >= $x AND bbox.ymin <= $y AND bbox.ymax >= $y "
+        "AND class = 'land' AND ST_Contains(geometry, ST_Point($x, $y))"
+    )
+    # the country filter is what makes the join quick: the files are spatial,
+    # so each row group carries a tight country range and most are skipped
+    # unread (25 s cold at Wuhan against 165 s without it, 1 to 3 s warm)
+    _Q_DIV = (
+        "SELECT id, local_type['en'], population "
+        f"FROM read_parquet('{_DIV}', hive_partitioning=0) "
+        "WHERE country = $country AND list_contains($ids, id)"
+    )
+
+    def division_at(lon, lat):
+        """The divisions holding the point, smallest first: a list of
+        {subtype, name, name_en, local_type, population}, locality up to
+        country, whichever Overture draws there. Raises on a failed read so
+        the caller can say so."""
+        c = _connect()
+        if c is None:
+            raise _dv["err"]
+        cur = c.cursor()
+        rows = cur.execute(_Q_AREA, {"x": float(lon), "y": float(lat)}).fetchall()
+        seen, out = set(), []
+        for sub, name, name_en, country, did in rows:
+            if sub in seen:
+                continue
+            seen.add(sub)
+            out.append({"subtype": sub, "name": name, "name_en": name_en, "local_type": None,
+                        "population": None, "id": did, "country": country})
+        out.sort(key=lambda d: _ORDER.get(d["subtype"], -1))
+        ids = [d["id"] for d in out if d["id"]]
+        country = next((d["country"] for d in out if d["country"]), None)
+        if ids and country:
+            try:
+                extra = {i: (lt, pop) for i, lt, pop in cur.execute(_Q_DIV, {"country": country, "ids": ids}).fetchall()}
+            except Exception:
+                extra = {}
+            for d in out:
+                d["local_type"], d["population"] = extra.get(d["id"], (None, None))
+        return out
+
+    # the footers, read now rather than on the first click, off the main
+    # thread: about 7 s for division_area and 25 s more for division
+    def _warm():
+        try:
+            division_at(HOME["longitude"], HOME["latitude"])
+        except Exception:
+            pass
+
+    _th.Thread(target=_warm, daemon=True).start()
+    return (division_at,)
+
+
+
+
+
+@app.cell
+def _(
+    AEF_LEVEL_FOR_RES,
+    GeoTIFF,
+    Image,
+    MOSAIC_MIN_RES,
+    RASTER_TILE,
+    S3Store,
+    WC_BUCKET,
+    WC_CLASSES,
+    WC_MAX_TILES,
+    WC_PREFIX,
+    WC_REGION,
+    WC_S3_OPTS,
+    Window,
+    asyncio,
+    cpu,
+    ctx,
+    io,
+    itertools,
+    math,
+    np,
+    time,
+    xr,
+):
+    # ---- ESA WorldCover: the class shares per hexagon, one fold per (box, res) --
+    # The same fold as AlphaEarth: every pixel's lon/lat and class through the
+    # H3 UDF in DataFusion, a count per class per cell. Below MOSAIC_MIN_RES
+    # it reads the overview whose pixel matches AlphaEarth's for that res
+    # (overview i is 10 * 2^(i + 1) m; the file has six), from there the
+    # native 10 m. The overviews are a sample of the classes, not a blend, so
+    # a share is a count of sampled pixels.
+    _store = S3Store(WC_BUCKET, region=WC_REGION, skip_signature=True, client_options=WC_S3_OPTS)
+    _open = {}
+    _sem = asyncio.Semaphore(32)
+    _seq = itertools.count()
+    WC_CODES = tuple(c for c, _ in WC_CLASSES)
+
+    def _tile_name(lat, lon):
+        """ESA's tile name for the 3 x 3 degree tile whose south-west corner is (lat, lon)."""
+        return f"{'N' if lat >= 0 else 'S'}{abs(lat):02d}{'E' if lon >= 0 else 'W'}{abs(lon):03d}"
+
+    async def _get(name):
+        if name not in _open:
+            async with _sem:
+                try:
+                    _open[name] = await GeoTIFF.open(f"{WC_PREFIX}/ESA_WorldCover_10m_2021_v200_{name}_Map.tif", store=_store)
+                except Exception as e:
+                    # open ocean: ESA has no tile there (async-tiff wraps the 404)
+                    if not (isinstance(e, FileNotFoundError) or "NotFound" in str(e) or "NoSuchKey" in str(e)):
+                        raise
+                    _open[name] = None
+        return _open[name]
+
+    async def _read(lat0, lon0, li, box):
+        """One tile's window under the box: (uint8 classes (h, w), lon of the
+        columns, lat of the rows) or None."""
+        g = await _get(_tile_name(lat0, lon0))
+        if g is None:
+            return None
+        lv = g if li < 0 else g.overviews[li]
+        H, W = lv.shape
+        px = 3.0 / W
+        top = lat0 + 3
+        W_, S_, E_, N_ = box
+        c0, c1 = max(0, int(math.floor((W_ - lon0) / px))), min(W, int(math.ceil((E_ - lon0) / px)))
+        r0, r1 = max(0, int(math.floor((top - N_) / px))), min(H, int(math.ceil((top - S_) / px)))
+        if c1 <= c0 or r1 <= r0:
+            return None
+        async with _sem:
+            ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
+        a = np.asarray(np.ma.filled(ra.as_masked(), 0)).reshape(r1 - r0, c1 - c0)
+        lon = lon0 + (np.arange(c0, c1) + 0.5) * px
+        lat = top - (np.arange(r0, r1) + 0.5) * px
+        return a, lon, lat
+
+    _CNT = ", ".join(f"sum(CASE WHEN c = {code} THEN 1 ELSE 0 END) AS wc{code}" for code in WC_CODES)
+
+    async def wc_fold(box, res):
+        """Per res cell over the box: `nwc` (classified pixels sampled) and one
+        count per class (`wc10` .. `wc100`). (table or None, stats)."""
+        t0 = time.time()
+        W_, S_, E_, N_ = box
+        li = -1 if res >= MOSAIC_MIN_RES else min(5, AEF_LEVEL_FOR_RES[res])
+        lats = range(int(math.floor(S_ / 3)) * 3, int(math.floor(N_ / 3)) * 3 + 1, 3)
+        lons = range(int(math.floor(W_ / 3)) * 3, int(math.floor(E_ / 3)) * 3 + 1, 3)
+        tiles = [(la, lo) for la in lats for lo in lons]
+        if len(tiles) > WC_MAX_TILES:
+            return None, f"land cover: {len(tiles)} tiles under the view; zoom in"
+        parts = [p for p in await asyncio.gather(*(_read(la, lo, li, box) for la, lo in tiles)) if p is not None]
+        if not parts:
+            return None, "land cover: nothing under the view"
+        t1 = time.time()
+
+        def _run():
+            name = f"wc_{next(_seq)}"
+            cls = np.concatenate([p[0].ravel() for p in parts]).astype(np.int16)
+            lon = np.concatenate([np.broadcast_to(p[1][None, :], p[0].shape).ravel() for p in parts])
+            lat = np.concatenate([np.broadcast_to(p[2][:, None], p[0].shape).ravel() for p in parts])
+            ctx.from_dataset(
+                name,
+                xr.Dataset({"c": (("i",), cls), "lat": (("i",), lat), "lon": (("i",), lon)}, coords={"i": np.arange(cls.size)}),
+                chunks={"i": 262_144},
+            )
+            try:
+                return ctx.sql(f"""
+                    SELECT h3_latlng_to_cell(lat, lon, CAST({res} AS INT)) AS cell, count(*) AS nwc, {_CNT}
+                    FROM {name}
+                    WHERE c > 0 AND lon >= {W_} AND lon < {E_} AND lat >= {S_} AND lat < {N_}
+                    GROUP BY cell
+                """).to_arrow_table()
+            finally:
+                ctx.deregister_table(name)
+
+        out = await cpu(_run)
+        lvl = "10 m" if li < 0 else f"ov{li} ({10 * 2 ** (li + 1)} m)"
+        return out, f"land cover {lvl} {len(parts)} tiles read {t1 - t0:.1f} s · fold {out.num_rows:,} {time.time() - t1:.1f} s"
+
+    return WC_CODES, wc_fold
+
+
+@app.cell
+def _(
+    GeoTIFF,
+    IO_CLASSES,
+    IO_COLLECTION,
+    IO_STAC,
+    IO_TOKEN,
+    LC_ROAD_W,
+    LC_VOCAB,
+    OV_TILES,
+    Transformer,
+    Window,
+    asyncio,
+    coordinates_to_cells,
+    cpu,
+    duckdb,
+    json,
+    math,
+    np,
+    pa,
+    time,
+):
+    # ---- the land cover teachers (see LC_* and IO_* in the constants) ----------
+    # Both fold to the FINER cells (the ones AlphaEarth is folded to), so each
+    # finer cell gets its own label. Nothing is saved.
+    import urllib.request as _ur
+    import threading as _th
+    from obstore.store import AzureStore as _AzureStore
+    from h3ronpy.vector import wkb_to_cells as _wkb_to_cells
+    import pyarrow.compute as _pc
+
+    _NV = len(LC_VOCAB)
+    # Impact Observatory's class code -> LC_VOCAB index (-1 teaches nothing)
+    _IO_LUT = np.full(256, -1, np.int16)
+    for _c, _nm in IO_CLASSES.items():
+        _IO_LUT[_c] = LC_VOCAB.index(_nm)
+    # an H3 cell's edge in m: Impact Observatory is read from the overview
+    # whose pixel is at most about half of it (res 10: 40 m, about nine
+    # pixels a cell), roads get a point every quarter of it (5 m at least)
+    _EDGE_M = {7: 1406, 8: 531, 9: 201, 10: 76, 11: 29, 12: 11, 13: 4, 14: 2, 15: 1}
+
+    # Impact Observatory, on Planetary Computer: one 10 m COG (UTM, five
+    # overviews) per zone per year, read with a SAS token that lasts about an
+    # hour (asked again after 30 min). The STAC search is kept per box.
+    _io = {"store": None, "at": 0.0, "open": {}, "items": {}}
+    _io_sem = asyncio.Semaphore(8)
+
+    def _io_json(req, tries=4):
+        # the token and the search sometimes stall for longer than the timeout:
+        # ask again rather than lose the year
+        for k in range(tries):
+            try:
+                return json.load(_ur.urlopen(req, timeout=20))
+            except (TimeoutError, OSError):
+                if k == tries - 1:
+                    raise
+                time.sleep(2 * (k + 1))
+
+    def _io_store(account):
+        if _io["store"] is None or time.time() - _io["at"] > 1800:
+            tok = _io_json(IO_TOKEN)["token"]
+            _io.update(store=_AzureStore(account_name=account, container_name="io-lulc", sas_key=tok), at=time.time(), open={})
+        return _io["store"]
+
+    def _io_search(box):
+        k = tuple(round(v, 3) for v in box)
+        if k not in _io["items"]:
+            q = json.dumps({"collections": [IO_COLLECTION], "bbox": list(box), "limit": 250}).encode()
+            r = _io_json(_ur.Request(IO_STAC, q, {"content-type": "application/json"}))
+            _io["items"][k] = [(int(f["properties"]["start_datetime"][:4]), f["assets"]["data"]["href"]) for f in r["features"]]
+        return _io["items"][k]
+
+    async def _io_part(href, box, fres):
+        account = href.split("//")[1].split(".")[0]
+        path = href.split("/io-lulc/")[1]
+        store = await asyncio.to_thread(_io_store, account)
+        async with _io_sem:
+            g = _io["open"].get(path)
+            if g is None:
+                g = _io["open"][path] = await GeoTIFF.open(path, store=store)
+        edge = _EDGE_M.get(fres, 1)
+        li = -1
+        for i in range(len(g.overviews)):
+            if 20 * 2 ** i <= edge / 1.8:
+                li = i
+        lv = g if li < 0 else g.overviews[li]
+        f = 1 if li < 0 else 2 ** (li + 1)
+        T = g.transform
+        px, py = T.a * f, T.e * f
+        W_, S_, E_, N_ = box
+        xs, ys = Transformer.from_crs("EPSG:4326", g.crs, always_xy=True).transform([W_, E_, W_, E_], [S_, S_, N_, N_])
+        H, Wd = lv.shape
+        c0, c1 = max(0, math.floor((min(xs) - T.c) / px)), min(Wd, math.ceil((max(xs) - T.c) / px))
+        r0, r1 = max(0, math.floor((max(ys) - T.f) / py)), min(H, math.ceil((min(ys) - T.f) / py))
+        if c1 <= c0 or r1 <= r0:
+            return None
+        async with _io_sem:
+            ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
+        a = np.asarray(np.ma.filled(ra.as_masked(), 0)).reshape(r1 - r0, c1 - c0)
+        return a, (T.c, T.f, px, py, c0, r0), g.crs, li
+
+    def _lonlat(tr, xs, ys, G=16):
+        # every pixel's lon, lat from a grid every G pixels, bilinear between
+        # (UTM to lon/lat bends far less than a pixel over G pixels)
+        ci = np.unique(np.r_[np.arange(0, len(xs), G), len(xs) - 1])
+        ri = np.unique(np.r_[np.arange(0, len(ys), G), len(ys) - 1])
+        gx, gy = np.meshgrid(xs[ci], ys[ri])
+        out = []
+        for g in tr.transform(gx, gy):
+            a = np.stack([np.interp(np.arange(len(xs)), ci, row) for row in np.asarray(g)])
+            out.append(np.stack([np.interp(np.arange(len(ys)), ri, a[:, j]) for j in range(a.shape[1])], 1))
+        return out
+
+    def _io_count(parts, box, fres):
+        W_, S_, E_, N_ = box
+        cs, ks = [], []
+        for a, (x0, y0, px, py, c0, r0), crs, _ in parts:
+            k = _IO_LUT[a.astype(np.int64)]
+            rr, cc = np.nonzero(k >= 0)
+            LON, LAT = _lonlat(Transformer.from_crs(crs, "EPSG:4326", always_xy=True),
+                               x0 + (c0 + np.arange(a.shape[1]) + 0.5) * px, y0 + (r0 + np.arange(a.shape[0]) + 0.5) * py)
+            lon, lat = LON[rr, cc], LAT[rr, cc]
+            inb = (lon >= W_) & (lon < E_) & (lat >= S_) & (lat < N_)
+            cs.append(pa.array(coordinates_to_cells(lat[inb], lon[inb], fres)).to_numpy(zero_copy_only=False).astype(np.uint64))
+            ks.append(k[rr[inb], cc[inb]])
+        if not cs or not sum(len(c) for c in cs):
+            return None
+        u, inv = np.unique(np.concatenate(cs), return_inverse=True)
+        M = np.bincount(inv * _NV + np.concatenate(ks), minlength=len(u) * _NV).reshape(len(u), _NV).astype(np.uint32)
+        return {"cell": u, "counts": M}
+
+    async def io_fold(box, fres, y):
+        """Impact Observatory's land cover in year y (2017..2023), per finer
+        cell: {"cell": sorted uint64, "counts": (n, len(LC_VOCAB)) pixels per
+        class} or None, and a status line."""
+        t0 = time.time()
+        try:
+            items = [h for yy, h in await asyncio.to_thread(_io_search, box) if yy == y]
+            if not items:
+                return None, f"Impact Observatory {y}: nothing here"
+            parts = [p for p in await asyncio.gather(*(_io_part(h, box, fres) for h in items)) if p is not None]
+            t1 = time.time()
+            out = await cpu(_io_count, parts, box, fres) if parts else None
+            lvl = "10 m" if not parts or parts[0][3] < 0 else f"{20 * 2 ** parts[0][3]} m"
+            return out, f"Impact Observatory {y} {lvl} read {t1 - t0:.1f} s, fold {time.time() - t1:.1f} s"
+        except Exception as e:
+            return None, f"Impact Observatory {y}: {type(e).__name__}: {e}"
+
+    # Overture from its own PMTiles: the vector tiles under the box, fetched
+    # together (transportation at zoom 14, land use at zoom 13; about 8 MB and
+    # 4 s for a 20 x 12 km view, against 13 s for DuckDB over the GeoParquet).
+    # Major roads and rail become road area per finer cell (a point every
+    # quarter cell edge along each line, 5 m at least, each worth that length
+    # x the class's width; only points inside their own tile, so the tile
+    # buffers do not count twice), and land use polygons the finer cells whose
+    # centers they hold (1 built-up, 2 construction).
+    import gzip as _gz
+    import struct as _st
+    import obstore as _obs
+    from obstore.store import S3Store as _S3
+    import mapbox_vector_tile as _mvt
+    from pmtiles.tile import deserialize_directory as _pm_dir, deserialize_header as _pm_head, find_tile as _pm_find, zxy_to_tileid as _pm_id
+
+    _ovs = _S3(OV_TILES[0], region="us-west-2", skip_signature=True)
+    _pm_kept = {}  # (path, offset, length) -> the header or a directory's bytes, in flight or read
+
+    async def _pm_bytes(path, off, n):
+        k = (path, off, n)
+        if k not in _pm_kept:
+            _pm_kept[k] = asyncio.ensure_future(_obs.get_range_async(_ovs, path, start=off, length=n))
+        return bytes(await _pm_kept[k])
+
+    async def _pm_tiles(name, z, box):
+        """The tiles of OV_TILES/<name>.pmtiles at zoom z under the box: [(x, y, bytes)]."""
+        path = f"{OV_TILES[1]}/{name}.pmtiles"
+        h = _pm_head(await _pm_bytes(path, 0, 127))
+        n = 2 ** z
+        W_, S_, E_, N_ = box
+        ty = lambda la: int((1 - math.asinh(math.tan(math.radians(la))) / math.pi) / 2 * n)
+        x0, x1 = int((W_ + 180) / 360 * n), int((E_ + 180) / 360 * n)
+
+        async def one(x, y):
+            tid, o, ln = _pm_id(z, x, y), h["root_offset"], h["root_length"]
+            for _ in range(4):
+                e = _pm_find(_pm_dir(await _pm_bytes(path, o, ln)), tid)
+                if e is None:
+                    return None
+                if e.run_length > 0:
+                    b = bytes(await _obs.get_range_async(_ovs, path, start=h["tile_data_offset"] + e.offset, length=e.length))
+                    return x, y, (_gz.decompress(b) if b[:2] == b"\x1f\x8b" else b)
+                o, ln = h["leaf_directory_offset"] + e.offset, e.length
+            return None
+
+        got = await asyncio.gather(*(one(x, y) for x in range(x0, x1 + 1) for y in range(ty(N_), ty(S_) + 1)))
+        return [g for g in got if g is not None], n
+
+    def _tile_lonlat(xy, x, y, n, ext):
+        # tile pixels (y down) to lon, lat
+        lon = (x + xy[:, 0] / ext) / n * 360 - 180
+        lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + xy[:, 1] / ext) / n))))
+        return lon, lat
+
+    def _ov_roads(tiles, n, step):
+        lat_, lon_, a_ = [], [], []
+        for x, y, b in tiles:
+            lay = _mvt.decode(b, default_options={"y_coord_down": True}).get("segment")
+            if not lay:
+                continue
+            ext = lay.get("extent", 4096)
+            for f in lay["features"]:
+                w = LC_ROAD_W.get(f["properties"].get("class"))
+                if w is None:
+                    continue
+                g = f["geometry"]
+                lines = [g["coordinates"]] if g["type"] == "LineString" else g["coordinates"] if g["type"] == "MultiLineString" else []
+                for ln in lines:
+                    xy = np.asarray(ln, np.float64)
+                    if len(xy) < 2:
+                        continue
+                    lon, lat = _tile_lonlat(xy, x, y, n, ext)
+                    dx = np.diff(lon) * 111320 * np.cos(np.radians(lat[:-1]))
+                    dy = np.diff(lat) * 110574
+                    cum = np.r_[0, np.cumsum(np.hypot(dx, dy))]
+                    m = cum[-1]
+                    if m <= 0:
+                        continue
+                    k = max(1, math.ceil(m / step))
+                    t = (np.arange(k) + 0.5) * m / k
+                    px = np.interp(t, cum, xy[:, 0])
+                    py = np.interp(t, cum, xy[:, 1])
+                    own = (px >= 0) & (px < ext) & (py >= 0) & (py < ext)  # this tile's own points only
+                    if own.any():
+                        lo, la = _tile_lonlat(np.stack([px[own], py[own]], 1), x, y, n, ext)
+                        lon_.append(lo)
+                        lat_.append(la)
+                        a_.append(np.full(own.sum(), w * m / k))
+        cat = lambda v: np.concatenate(v) if v else np.zeros(0)
+        return pa.table({"lat": cat(lat_), "lon": cat(lon_), "a": cat(a_)})
+
+    def _ov_landuse(tiles, n):
+        ks, wkbs = [], []
+        for x, y, b in tiles:
+            lay = _mvt.decode(b, default_options={"y_coord_down": True}).get("land_use")
+            if not lay:
+                continue
+            ext = lay.get("extent", 4096)
+            for f in lay["features"]:
+                pr, g = f["properties"], f["geometry"]
+                if not (pr.get("subtype") in ("construction", "resource_extraction") or pr.get("class") in ("industrial", "residential", "landfill")):
+                    continue
+                # GREENFIELD IS NOT CONSTRUCTION: Overture's construction subtype has class greenfield
+                # for land planned but not broken. In north Phoenix ("TSMC Innovation Corridor", "Halo
+                # Vista") ~9 km2 of untouched desert taught the reader desert was construction
+                if pr.get("class") == "greenfield":
+                    continue
+                polys = [g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"] if g["type"] == "MultiPolygon" else []
+                parts = []
+                for rings in polys:
+                    rb = []
+                    for r in rings:
+                        xy = np.asarray(r, np.float64)
+                        if len(xy) < 3:
+                            continue
+                        if (xy[0] != xy[-1]).any():
+                            xy = np.vstack([xy, xy[:1]])
+                        lon, lat = _tile_lonlat(xy, x, y, n, ext)
+                        rb.append(_st.pack("<I", len(xy)) + np.stack([lon, lat], 1).astype("<f8").tobytes())
+                    if rb:
+                        parts.append(_st.pack("<BII", 1, 3, len(rb)) + b"".join(rb))
+                if parts:
+                    ks.append(2 if pr.get("subtype") in ("construction", "resource_extraction") or pr.get("class") == "landfill" else 1)
+                    wkbs.append(parts[0] if len(parts) == 1 else _st.pack("<BII", 1, 6, len(parts)) + b"".join(parts))
+        return pa.table({"k": pa.array(ks, pa.uint8()), "wkb": pa.array(wkbs, pa.binary())})
+
+    def _ov_cells(roads, lu, fres):
+        rc = pa.array(coordinates_to_cells(roads["lat"].to_numpy(), roads["lon"].to_numpy(), fres)).to_numpy(zero_copy_only=False).astype(np.uint64) if roads.num_rows else np.zeros(0, np.uint64)
+        ra = roads["a"].to_numpy() if roads.num_rows else np.zeros(0)
+        lc_, lk_ = np.zeros(0, np.uint64), np.zeros(0, np.uint8)
+        if lu.num_rows:
+            lists = pa.array(_wkb_to_cells(lu["wkb"].combine_chunks(), fres))
+            lens = _pc.list_value_length(lists).to_numpy(zero_copy_only=False)
+            lc_ = _pc.list_flatten(lists).to_numpy(zero_copy_only=False).astype(np.uint64)
+            lk_ = np.repeat(lu["k"].to_numpy().astype(np.uint8), np.nan_to_num(lens).astype(np.int64))
+        u = np.unique(np.concatenate([rc, lc_]))
+        road = np.zeros(len(u))
+        np.add.at(road, np.searchsorted(u, rc), ra)
+        lu_k = np.zeros(len(u), np.uint8)
+        np.maximum.at(lu_k, np.searchsorted(u, lc_), lk_)  # construction over built-up
+        return {"cell": u, "road_m2": road, "lu": lu_k}
+
+    async def ov_fold(box, fres):
+        """Overture roads and land use per finer cell: {"cell": sorted uint64,
+        "road_m2", "lu" (0 none, 1 built-up, 2 construction)} or None, and a
+        status line."""
+        t0 = time.time()
+        try:
+            step = max(5, round(_EDGE_M.get(fres, 20) / 4))
+            # zoomed out, Overture's coarser tiles: a zoom 9 view is ~16,000 tiles at 14 and 13. Roads at 14 from finer
+            # cells at res 11, one tile zoom less per res coarser, 11 at the least; they keep the
+            # major roads, the only ones that make a road cell. Land use one zoom under the roads
+            zr = max(11, min(14, fres + 3))
+            (rt, rn), (lt, ln) = await asyncio.gather(_pm_tiles("transportation", zr, box), _pm_tiles("base", zr - 1, box))
+            t1 = time.time()
+
+            def _job():
+                roads, lu = _ov_roads(rt, rn, step), _ov_landuse(lt, ln)
+                return roads, lu, _ov_cells(roads, lu, fres)
+
+            roads, lu, out = await cpu(_job)
+            return out, (f"Overture PMTiles z{zr}/{zr - 1} {len(rt) + len(lt)} tiles {sum(len(t[2]) for t in rt + lt) / 1e6:.1f} MB read {t1 - t0:.1f} s, "
+                         f"{roads.num_rows:,} road points, {lu.num_rows:,} land use polygons, fold {time.time() - t1:.1f} s")
+        except Exception as e:
+            return None, f"Overture: {type(e).__name__}: {e}"
+
+    return io_fold, ov_fold
+
+
+@app.cell
+def _(
+    AEF_YEARS_ALL,
+    BUILT_LC,
+    BUILT_SHARE,
+    HIST_RESTLESS,
+    KINDS_K,
+    KINDS_ON,
+    KINDS_TOP,
+    LC_CAP,
+    LC_MIN,
+    LC_PURE,
+    LC_ROAD_FILL,
+    LC_VOCAB,
+    NEW_FROM,
+    WC_CLASSES,
+    WC_CODES,
+    change_resolution,
+    con,
+    np,
+    os,
+    pa,
+):
+    # ---- a FRAME: AlphaEarth over the window, the land cover beside it ----------
+    # The fill is how much the fingerprint moved between the window's two ends, stretched
+    # to this view's p2..p98. The change year is the year whose step stands
+    # out most against THAT YEAR'S median step in view: the embeddings shift
+    # as a whole between some years (measured over Lagos, 2026-09-25: the
+    # 2024 to 2025 median step is 0.034, the others 0.012 to 0.022), so the
+    # raw biggest step lands on 2025 almost everywhere. Each step is divided
+    # by its year's median; the card shows those ratios against 1.
+    #
+    # CARRY THE PEAK: the years arrive folded at a finer res than the
+    # hexagons (about a pixel of the read per finer cell). Steps, change and
+    # change year are worked out per finer cell; each hexagon then takes the
+    # finer cell that moved most, whole (its change, its year, its steps).
+    # A hexagon reads "the most-changed patch in here", not "the average of
+    # in here", so one changed site is not diluted by the quiet ground around it.
+    _WC_NAME = dict(WC_CLASSES)
+    # EARTHWORK: earthwork_model.py's logistic regression on [b, a, a * b, (a - b)^2], b and a the unit
+    # AlphaEarth vectors of the window's first and last year
+    _ew = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "earthwork-lr.npz"))
+    EW_W, EW_B = _ew["w"].astype(np.float32), float(_ew["b"])
+
+    def _earthwork(Vf, Vl, chunk=200_000):
+        """The chance the ground moved, per row of Vf (first year) and Vl (last year); NaN where either is missing."""
+        out = np.full(len(Vf), np.nan, np.float32)
+        for i in range(0, len(Vf), chunk):
+            f, l = Vf[i:i + chunk], Vl[i:i + chunk]
+            ok = np.isfinite(f).all(1) & np.isfinite(l).all(1)
+            b = np.nan_to_num(f) / np.maximum(np.linalg.norm(np.nan_to_num(f), axis=1), 1e-9)[:, None]
+            a = np.nan_to_num(l) / np.maximum(np.linalg.norm(np.nan_to_num(l), axis=1), 1e-9)[:, None]
+            z = np.c_[b, a, a * b, (a - b) ** 2] @ EW_W + EW_B
+            out[i:i + chunk] = np.where(ok, 1 / (1 + np.exp(-z)), np.nan)
+        return out
+
+    from h3ronpy import cells_area_m2 as _cells_area_m2
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    # the land cover reader's years train side by side (numpy lets go of the
+    # GIL in the matrix products): its own pool, as the frame itself runs on
+    # the cpu pool
+    _lc_pool = _TPE(4, thread_name_prefix="lc")
+
+    # WorldCover's classes in LC_VOCAB (the stand-in teacher)
+    _WC_LC = {10: "trees", 20: "grass", 30: "grass", 40: "cropland", 50: "built-up", 60: "bare",
+              80: "water", 90: "wetland", 95: "wetland", 100: "grass"}
+    _NV = len(LC_VOCAB)
+
+    # LAND COVER READ FROM ALPHAEARTH (see LC_* in the constants): a softmax
+    # regression on [1, 64 numbers], Adam on the cross-entropy, classes
+    # balanced to LC_CAP examples each. One per year. Returns a reader
+    # (rows -> LC_VOCAB index, -1 where a row has no vector) or None.
+    def _lc_fit(X, lab, seed, iters=250, l2=1e-3, lr=0.05):
+        rng = np.random.default_rng(seed)
+        ok = (lab >= 0) & np.isfinite(X).all(1)
+        cls = [c for c in range(_NV) if (ok & (lab == c)).sum() >= LC_MIN]
+        if len(cls) < 2:
+            return None, {}
+        b = np.concatenate([(lambda i: i if len(i) <= LC_CAP else rng.choice(i, LC_CAP, replace=False))(np.flatnonzero(ok & (lab == c))) for c in cls])
+        Xb = np.c_[np.ones(len(b)), X[b]].astype(np.float32)
+        Yo = np.eye(len(cls), dtype=np.float32)[np.searchsorted(cls, lab[b])]
+        Wt = np.zeros((Xb.shape[1], len(cls)), np.float32)
+        m1, m2 = np.zeros_like(Wt), np.zeros_like(Wt)
+        for it in range(1, iters + 1):
+            Z = Xb @ Wt
+            Z -= Z.max(1, keepdims=True)
+            P = np.exp(Z)
+            P /= P.sum(1, keepdims=True)
+            g = Xb.T @ (P - Yo) / len(Xb) + l2 * Wt
+            m1 = 0.9 * m1 + 0.1 * g
+            m2 = 0.999 * m2 + 0.001 * g * g
+            Wt -= lr * (m1 / (1 - 0.9 ** it)) / (np.sqrt(m2 / (1 - 0.999 ** it)) + 1e-8)
+        cl = np.asarray(cls)
+
+        def read(V):
+            good = np.isfinite(V).all(1)
+            out = cl[np.argmax(np.c_[np.ones(len(V)), np.nan_to_num(V)] @ Wt, 1)]
+            return np.where(good, out, -1)
+
+        return read, {LC_VOCAB[c]: int((ok & (lab == c)).sum()) for c in cls}
+
+    def _pure(counts):
+        # a finer cell's class when LC_PURE of it is one class, else -1
+        tot = counts.sum(1)
+        j = counts.argmax(1)
+        return np.where((tot > 0) & (counts.max(1) >= LC_PURE * np.maximum(tot, 1)), j, -1)
+
+    def _on(fine, t, col):
+        # a teacher's column on the frame's finer cells (0 where it has none)
+        if t is None or not len(t["cell"]):
+            return np.zeros((len(fine),) + np.shape(t[col])[1:] if t is not None else (len(fine),))
+        pos = np.clip(np.searchsorted(t["cell"], fine), 0, len(t["cell"]) - 1)
+        m = t["cell"][pos] == fine
+        v = np.asarray(t[col])[pos]
+        return np.where(m.reshape((-1,) + (1,) * (v.ndim - 1)), v, 0)
+
+    # THE WHOLE HISTORY, per picked finer cell (see HIST_* in the constants).
+    # Its change year k splits the years into before and after; `mb` is the
+    # ground before (the mean of those years' vectors). The embeddings drift
+    # as a whole from year to year, so late years sit far from early ones
+    # everywhere: every test compares like with like. Steps are multiples of
+    # their year's median step in view (`hrel`), and "came back" asks
+    # whether the last year is closer to the ground before than to year k.
+    # Codes: 0 unknown, 1 one step that held, 2 came back, 3 changes this
+    # much most years, 4 kept moving, 5 too recent to tell (k is the last year).
+    HIST_KIND = {1: "held", 2: "came back", 3: "changes most years", 4: "kept moving", 5: "too recent"}
+
+    def _trajectory(Vs, hyears, hrel, idx, kyr):
+        m, T = len(idx), len(hyears)
+        yrs = np.array(hyears)
+        kyr = np.asarray(kyr)
+        kt = np.clip(np.searchsorted(yrs, kyr), 0, T - 1)
+        valid = (kyr > yrs[0]) & (yrs[kt] == kyr)
+        mb = np.zeros((m, 64), np.float32)
+        for y in hyears:
+            V = Vs[y][idx]
+            valid &= np.isfinite(V).all(1)
+            mb += np.where((y < kyr)[:, None], np.nan_to_num(V), 0.0)
+        mb /= np.maximum(np.linalg.norm(mb, axis=1), 1e-9)[:, None]
+        kc = np.clip(kt, 1, T - 1)
+        VL = np.nan_to_num(Vs[hyears[-1]][idx])
+        Vk = np.nan_to_num(np.stack([Vs[y][idx] for y in hyears], 0)[kc, np.arange(m)])
+        back = (1.0 - np.einsum("ij,ij->i", VL, mb)) < (1.0 - np.einsum("ij,ij->i", VL, Vk))
+        r = hrel[:, idx].T  # (m, T - 1): column t is the step into year t + 1
+        col = np.arange(T - 1)[None, :]
+        rk = r[np.arange(m), kc - 1]
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            noise = np.nanmedian(np.where(col == (kc - 1)[:, None], np.nan, r), 1)
+            after = np.nanmedian(np.where(col > (kc - 1)[:, None], r, np.nan), 1)
+        ratio = np.where(noise > 0, rk / noise, np.nan).astype(np.float32)
+        # kept moving: the years after k still step HIST_RESTLESS times the usual
+        growing = (after >= HIST_RESTLESS) & ((T - 1 - kc) >= 2)
+        code = np.select(
+            [~valid, kc == T - 1, ratio < HIST_RESTLESS, back, growing],
+            [0, 5, 3, 2, 4], 1).astype(np.uint8)
+        return code, ratio
+
+    # KINDS OF CHANGE (see KINDS_* in the constants): spherical k-means on
+    # unit change directions, k-means++ start, fit on a sample, every moved
+    # cell assigned to its nearest kind; kinds numbered largest first.
+    def _kinds(X, k, seed=0, iters=30, sample=20000):
+        rng = np.random.default_rng(seed)
+        S = X[rng.choice(len(X), min(len(X), sample), replace=False)]
+        C = [S[rng.integers(len(S))]]
+        for _ in range(1, k):
+            d = np.clip(1.0 - np.max(S @ np.array(C).T, 1), 0, None)
+            C.append(S[rng.choice(len(S), p=d / d.sum())] if d.sum() > 0 else S[rng.integers(len(S))])
+        C = np.array(C)
+        for _ in range(iters):
+            a = np.argmax(S @ C.T, 1)
+            Cn = np.stack([S[a == j].sum(0) if (a == j).any() else C[j] for j in range(k)])
+            Cn /= np.maximum(np.linalg.norm(Cn, axis=1), 1e-9)[:, None]
+            done = np.abs(Cn - C).max() < 1e-5
+            C = Cn
+            if done:
+                break
+        lab = np.argmax(X @ C.T, 1)
+        rank = np.empty(k, np.int64)
+        rank[np.argsort(-np.bincount(lab, minlength=k))] = np.arange(k)
+        return rank[lab]
+
+    def build_frame(aef_by_year, wc, y0, y1, res, hist=False, teach=None, built_only=True):
+        years = [y for y in range(y0, y1 + 1) if aef_by_year.get(y) is not None]
+        if len(years) < 2:
+            return None
+        # every year read when the whole history is asked for, the window's otherwise
+        hyears = sorted(y for y, t in aef_by_year.items() if t is not None) if hist else years
+        # every year on the first year's cells (sorted, see _compact), NaN
+        # where a year has none; not changed in place below
+        base = aef_by_year[years[0]]["cell"]
+        nfine = len(base)
+
+        def _V(y):
+            t = aef_by_year[y]
+            if t["cell"] is base:
+                return t["V"]
+            V = np.full((nfine, 64), np.nan, np.float32)
+            if len(t["cell"]):
+                pos = np.clip(np.searchsorted(t["cell"], base), 0, len(t["cell"]) - 1)
+                m_ = t["cell"][pos] == base
+                V[m_] = t["V"][pos[m_]]
+            return V
+
+        Vs = {y: _V(y) for y in hyears}
+        step_years = list(zip(years[:-1], years[1:]))
+        steps = np.stack([(1.0 - np.einsum("ij,ij->i", Vs[a], Vs[b])).astype(np.float32) for a, b in step_years], 0)
+        disp = (1.0 - np.einsum("ij,ij->i", Vs[years[0]], Vs[years[-1]])).astype(np.float32)
+        has = ~np.isnan(steps).all(0)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            med = np.nanmedian(steps, axis=1)
+        med = np.where(np.isfinite(med) & (med > 0), med, np.nan).astype(np.float32)
+        rel = steps / med[:, None]
+        k = np.argmax(np.where(np.isnan(rel), -np.inf, rel), 0)
+        yb = np.array([b for _, b in step_years], np.int64)
+        big = np.where(has, yb[k], -2).astype(np.int64)
+        Vf_, Vl_ = Vs[years[0]], Vs[years[-1]]
+        hist = hist and len(hyears) > len(years)
+        if hist:
+            hstep_years = list(zip(hyears[:-1], hyears[1:]))
+            hsteps = np.stack([(1.0 - np.einsum("ij,ij->i", Vs[a], Vs[b])).astype(np.float32) for a, b in hstep_years], 0)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                hmed = np.nanmedian(hsteps, axis=1)
+            hmed = np.where(np.isfinite(hmed) & (hmed > 0), hmed, np.nan).astype(np.float32)
+            hrel = hsteps / hmed[:, None]
+
+        # the hexagons (each finer cell's parent), then what is there, then the
+        # land cover read from AlphaEarth, then the kinds and each hexagon's peak
+        fine = base
+        par = pa.array(change_resolution(fine, res)).to_numpy(zero_copy_only=False).astype(np.uint64)
+        cellid = np.unique(par)
+        n = len(cellid)
+        disp_f = disp
+        # earthwork: each hexagon takes its highest-scoring finer cell, so one dig is not averaged away
+        earth_f = _earthwork(Vf_, Vl_)
+        earth = np.full(n, -1.0, np.float32)
+        okf = np.isfinite(earth_f)
+        if n and okf.any():
+            np.maximum.at(earth, np.searchsorted(cellid, par)[okf], earth_f[okf])
+        earth = np.where(earth >= 0, earth, np.nan).astype(np.float32)
+
+        nwc = np.zeros(n)
+        share = np.zeros((n, len(WC_CODES)))
+        if wc is not None and wc.num_rows:
+            wcell = wc["cell"].to_numpy().astype(np.uint64)
+            ow = np.argsort(wcell)
+            wcell = wcell[ow]
+            pos = np.clip(np.searchsorted(wcell, cellid), 0, len(wcell) - 1)
+            m = wcell[pos] == cellid
+            wn = np.nan_to_num(wc["nwc"].to_numpy(zero_copy_only=False).astype(np.float64))[ow]
+            nwc = np.where(m, wn[pos], 0.0)
+            C = np.stack([np.nan_to_num(wc[f"wc{c}"].to_numpy(zero_copy_only=False).astype(np.float64))[ow][pos] for c in WC_CODES], 1)
+            share = np.where(m[:, None], C, 0.0) / np.maximum(nwc, 1)[:, None]
+        top = np.where(nwc > 0, share.argmax(1), -1)
+        top_share = np.where(nwc > 0, share.max(1), 0.0)
+
+        # land cover read from AlphaEarth, every year (see LC_* in the constants)
+        lyears = hyears if hist else years
+        teach = teach or {}
+        io_t, ov_t = teach.get("io") or {}, teach.get("ov")
+        quiet_f = np.isfinite(disp_f) & (disp_f <= float(np.nanmedian(disp_f))) if np.isfinite(disp_f).any() else np.zeros(nfine, bool)
+        io_lab = {y: _pure(_on(fine, t, "counts")) for y, t in io_t.items() if t is not None}
+        ov_lab = np.full(nfine, -1)
+        if ov_t is not None:
+            lu = _on(fine, ov_t, "lu")
+            ov_lab = np.where(lu == 2, LC_VOCAB.index("construction"), np.where(lu == 1, LC_VOCAB.index("built-up"), -1))
+            cell_m2 = float(np.mean(pa.array(_cells_area_m2(pa.array(fine[:1000]))).to_numpy(zero_copy_only=False))) if nfine else 1.0
+            ov_lab = np.where(_on(fine, ov_t, "road_m2") >= LC_ROAD_FILL * cell_m2, LC_VOCAB.index("road"), ov_lab)
+        src = []
+        if io_lab:
+            src.append("Impact Observatory " + (f"{min(io_lab)}" if len(io_lab) == 1 else f"{min(io_lab)} to {max(io_lab)}"))
+            wc_lab = None
+        else:
+            # the stand-in: WorldCover 2021 on hexagons mostly one class
+            wc_lab = np.full(nfine, -1)
+            if n and (nwc > 0).any():
+                hix = np.searchsorted(cellid, par)
+                t_ = np.where((top_share >= LC_PURE) & (top >= 0), top, -1)[hix]
+                wc_lab = np.where(t_ >= 0, np.array([LC_VOCAB.index(_WC_LC[c]) if c in _WC_LC else -1 for c in WC_CODES] + [-1])[t_], -1)
+            src.append("ESA WorldCover 2021")  # Impact Observatory is not read in this notebook (see _teach_need)
+        if ov_t is not None:
+            src.append("Overture")
+        last = AEF_YEARS_ALL[-1]
+        labs = {}
+        for y in lyears:
+            if io_lab:
+                if y in io_lab:
+                    lab = io_lab[y].copy()  # the map of this very year, all ground
+                else:
+                    ny_ = min(io_lab, key=lambda k: abs(k - y))
+                    lab = np.where(quiet_f, io_lab[ny_], -1)
+            else:
+                lab = np.where(quiet_f, wc_lab, -1) if y != 2021 else wc_lab.copy()
+            # Overture is today's: the last year on all ground, earlier only quiet
+            ov_y = ov_lab if y == last else np.where(quiet_f, ov_lab, -1)
+            labs[y] = np.where(ov_y >= 0, ov_y, lab)
+        fits = dict(zip(lyears, _lc_pool.map(lambda y: _lc_fit(Vs[y], labs[y], seed=y), lyears)))
+        readers = {y: f[0] for y, f in fits.items()}
+        lc_n = fits[years[-1]][1] if years[-1] in fits else {}
+        _none = lambda V: np.full(len(V), -1, np.int64)
+        lc_f0, lc_f1 = (readers[years[0]] or _none)(Vf_), (readers[years[-1]] or _none)(Vl_)
+        # BUILT ONLY (as the screenshot notebook): the finer cells AlphaEarth reads as built-up, road or
+        # construction (BUILT_LC) in the last year read are the only ones grouped, and a hexagon's
+        # peak is its most-changed built finer cell
+        built_f = np.isin(lc_f1, BUILT_LC) if built_only else np.ones(nfine, bool)
+
+        # kinds of change, per finer cell: 0 did not move enough to group
+        kind_f = np.zeros(nfine, np.uint8)
+        ok_ = np.isfinite(disp_f) & np.isfinite(Vf_).all(1) & np.isfinite(Vl_).all(1)
+        okc = ok_ & built_f
+        # NEW GROUND APART (otherwise every kind reads "stays built-up" and new construction has no
+        # kind of its own): ground read built in the last year but not built-up or road in the first is
+        # grouped on its own, so new construction gets kinds of its own (numbered first), and the ground
+        # already built gets the rest. New ground's share of the kinds follows its share of what moved,
+        # at least 2 when it has 100 moved cells, and the built ground keeps at least 2 too
+        new_f = (lc_f1 >= 0) & np.isin(lc_f1, BUILT_LC) & (lc_f0 >= 0) & ~np.isin(lc_f0, NEW_FROM)
+        kn = 0
+        if KINDS_ON and okc.sum() >= 50 * KINDS_K:
+            D = np.nan_to_num(Vl_ - Vf_)
+            D -= D[ok_].mean(0)  # the change the whole view made
+            mv = np.flatnonzero(okc & (disp_f >= float(np.quantile(disp_f[okc], 1 - KINDS_TOP))))
+            X = D[mv] / np.maximum(np.linalg.norm(D[mv], axis=1), 1e-9)[:, None]
+            isn = new_f[mv]
+            nn, no = int(isn.sum()), int((~isn).sum())
+            if nn >= 50:
+                kn = max(2 if nn >= 100 else 1, round(KINDS_K * nn / len(mv)))
+                kn = min(kn, KINDS_K - (2 if no >= 100 else 1 if no >= 50 else 0))
+            ko = KINDS_K - kn if no >= 50 else 0
+            if kn:
+                kind_f[mv[isn]] = _kinds(X[isn], kn, seed=nn) + 1
+            if ko:
+                kind_f[mv[~isn]] = _kinds(X[~isn], ko, seed=no) + 1 + kn
+
+        # the peak: per hexagon, its finer cell with the biggest change (built ones first)
+        dkey = np.where(np.isnan(disp_f), -np.inf, disp_f) + np.where(built_f, 10.0, 0.0)
+        o = np.lexsort((-dkey, par))
+        ps = par[o]
+        first = np.r_[True, ps[1:] != ps[:-1]] if len(ps) else np.zeros(0, bool)
+        pk = o[first]
+        nkids = np.diff(np.r_[np.flatnonzero(first), len(ps)]).astype(np.int32)
+        disp, big, steps, rel = disp_f[pk], big[pk], steps[:, pk], rel[:, pk]
+        kind = kind_f[pk]
+        lcy = np.stack([(readers[y] or _none)(Vs[y][pk]) for y in lyears], 1) if n else np.zeros((0, len(lyears)), np.int64)
+        # the share of each hexagon's finer cells read as built (BUILT_LC) in the last year
+        bu_share = (np.bincount(np.searchsorted(cellid, par), weights=np.isin(lc_f1, BUILT_LC).astype(np.float64), minlength=n) / np.maximum(nkids, 1)) if n else np.zeros(0)
+        # drawn on built ground only: the peak reads built in the last year, and BUILT_SHARE of it does
+        built_h = (np.isin(lc_f1[pk], BUILT_LC) & (bu_share >= BUILT_SHARE)) if n else np.zeros(0, bool)
+
+        # the whole history: each hexagon's change peak, judged around its own
+        # change year
+        ccode = np.zeros(n, np.uint8)
+        cratio = np.full(n, np.nan, np.float32)
+        if hist and n:
+            ccode, cratio = _trajectory(Vs, hyears, hrel, pk, big)
+            hsteps_h, hrel_h = hsteps[:, pk], hrel[:, pk]
+            # the biggest step in the whole history, which may sit outside the window
+            hbig = np.where(np.isnan(hrel_h).all(0), -2, np.array([b for _, b in hstep_years])[np.argmax(np.nan_to_num(hrel_h, nan=-np.inf), 0)])
+        # the hexagon's biggest yearly step as a multiple of the usual step in
+        # view that year (the card)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            stand = np.nanmax(rel, axis=0) if rel.size else np.zeros(n, np.float32)
+        stand = np.where(np.isfinite(stand), stand, np.nan).astype(np.float32)
+
+        scored = ~np.isnan(disp)
+        if scored.sum() >= 2:
+            lo, hi = (float(q) for q in np.percentile(disp[scored], [2, 98]))
+            hi = hi if hi > lo else lo + 1e-6
+        else:
+            lo, hi = 0.0, 1.0
+        level = np.where(scored, np.clip((np.nan_to_num(disp) - lo) / (hi - lo), 0, 1), np.nan).astype(np.float32)
+
+        lc_model = {"classes": list(lc_n), "examples": list(lc_n.values()), "short": list(LC_VOCAB), "source": " and ".join(src)}
+
+        # each kind in a line, to help name it: its hexagons, their most common
+        # change year, and what AlphaEarth reads it as in the first and last
+        # year. (It was the WorldCover 2021 class it had most more of than the
+        # view: on a highway and building site that read "cropland", the
+        # ground from before the change.)
+        kinds = []
+        for kk in range(1, KINDS_K + 1):
+            m = kind == kk
+            yv = big[m][big[m] > 0]
+            q = {"n": int(m.sum()), "year": int(np.bincount(yv - 2000).argmax() + 2000) if len(yv) else None, "from": None, "to": None, "pair_share": None}
+            # what AlphaEarth reads its finer cells as, first year and last: the most common pair
+            mf = (kind_f == kk) & (lc_f0 >= 0) & (lc_f1 >= 0)
+            if mf.any():
+                pc = np.bincount(lc_f0[mf] * _NV + lc_f1[mf])
+                a_, b_ = divmod(int(pc.argmax()), _NV)
+                q["from"], q["to"], q["pair_share"] = LC_VOCAB[a_], LC_VOCAB[b_], float(pc.max() / mf.sum())
+            kinds.append(q)
+
+        cells = pa.table({
+            "cell": pa.array(cellid),
+            "earthwork": pa.array(earth),
+            "disp": pa.array(disp),
+            "level": pa.array(level),
+            "big_year": pa.array(big.astype(np.int16)),
+            "finer_cells": pa.array(nkids),
+            "stands_out": pa.array(stand),
+            "kind": pa.array(kind),
+            "change_history": pa.array([HIST_KIND.get(int(c_)) for c_ in ccode], pa.string()),
+            **{f"step_{b}": pa.array(steps[i]) for i, (_, b) in enumerate(step_years)},
+            **{f"rel_{b}": pa.array(rel[i]) for i, (_, b) in enumerate(step_years)},
+            **{f"reads_as_{y}": pa.array([LC_VOCAB[t] if t >= 0 else None for t in lcy[:, i]], pa.string()) for i, y in enumerate(lyears)},
+            "landcover": pa.array([_WC_NAME[WC_CODES[t]] if t >= 0 else None for t in top]),
+            "landcover_share": pa.array(top_share.astype(np.float32)),
+            **{f"wc_{_WC_NAME[c].replace(' ', '_')}": pa.array(share[:, i].astype(np.float32)) for i, c in enumerate(WC_CODES)},
+        })
+        return {
+            "cells": cells, "cellid": cellid, "res": res, "disp": disp, "level": level, "big": big, "earth": earth,
+            "steps": steps, "rel": rel, "med": med, "step_years": step_years, "years": years, "y0": y0, "y1": y1,
+            "shift_lo": lo, "shift_hi": hi, "share": share, "nwc": nwc, "top": top, "top_share": top_share,
+            "stand": stand, "kind": kind, "kinds": kinds, "lcy": lcy, "lyears": lyears, "lc_model": lc_model,
+            "hist": hist, "hyears": hyears, "ccode": ccode, "cratio": cratio, "built_only": built_only, "bu_share": bu_share, "built_h": built_h,
+            "hsteps": hsteps_h if hist and n else None, "hrel": hrel_h if hist and n else None,
+            "hstep_years": hstep_years if hist else None, "hbig": hbig if hist and n else None,
+            "score": f"AEF {years[0]} to {years[-1]}: {int(scored.sum()):,} of {n:,} cells scored, peak of {nfine:,} finer cells, median steps "
+                     + ", ".join(f"{b} {m:.3f}" for (_, b), m in zip(step_years, med))
+                     + ("" if not KINDS_ON else " | kinds of change: " + ", ".join(f"{j + 1}: {q['n']:,}" + (f" {q['from']} to {q['to']} {100 * q['pair_share']:.0f}%" if q["from"] else "") for j, q in enumerate(kinds)))
+                     + f" | land cover read from AlphaEarth, taught by {lc_model['source']}: " + (", ".join(f"{c} {k:,}" for c, k in zip(lc_model["classes"], lc_model["examples"])) or "nothing"),
+        }
+
+    return (build_frame,)
+
+
+@app.cell
+def _(anywidget, asyncio, time, traitlets):
+    # every deck.gl import names the same versions (iceye-view.py's set), so deck.gl-raster's layers
+    # and the map's share one deck.gl
+    _L = ",".join(f"@loaders.gl/{m}@4.4.3" for m in ["core", "gis", "loader-utils", "mvt", "terrain", "tiles", "wms", "schema",
+                                                      "images", "worker-utils", "compression", "crypto", "zip", "math", "textures",
+                                                      "draco", "gltf", "3d-tiles", "polyfills"])
+    _LUMA = "@luma.gl/core@9.3.6,@luma.gl/engine@9.3.6,@luma.gl/webgl@9.3.6,@luma.gl/shadertools@9.3.6,@luma.gl/gltf@9.3.6"
+    _DECK = "@deck.gl/core@9.3.10,@deck.gl/layers@9.3.10,@deck.gl/geo-layers@9.3.10,@deck.gl/mesh-layers@9.3.10,@deck.gl/extensions@9.3.10"
+    _DGR = "@developmentseed/deck.gl-raster@0.8.0,@developmentseed/geotiff@0.8.0,@developmentseed/proj@0.8.0,@developmentseed/affine@0.8.0,@developmentseed/morecantile@0.8.0,@developmentseed/raster-reproject@0.8.0"
+    _DEPS = f"deps={_DECK},{_LUMA},apache-arrow@18.1.0,{_L},{_DGR}"
+
+    class ChangeMap(anywidget.AnyWidget):
+        """The map: the AlphaEarth hexagons in viridis on a plain basemap; press
+        and hold for the Sentinel-2 imagery (the hexagons go while you hold),
+        scroll while holding to change its year; the year card at the top
+        right with the view's changes by year and the clicked hexagon's account.
+
+        Kernel -> browser: `cells` (uint64 LE) with `hattrs` (4 bytes per
+        hexagon: the year of its biggest step, 0 none, else year - 2000; how
+        much it moved 1..255, 0 none; its main land cover, 0 none, else class
+        index + 1; that class's share 0..255) and `hmeta` (JSON); `card`
+        (JSON); `status`; `config`. Browser -> kernel: `view`, `pick`, `ctl`.
+        Tiles are custom messages: `s2`, a year's mosaic."""
+
+        cells = traitlets.Bytes(b"").tag(sync=True)
+        hattrs = traitlets.Bytes(b"").tag(sync=True)
+        hmeta = traitlets.Unicode("{}").tag(sync=True)
+        config = traitlets.Unicode("{}").tag(sync=True)
+        status = traitlets.Unicode("").tag(sync=True)
+        card = traitlets.Unicode("").tag(sync=True)
+        view = traitlets.Unicode("").tag(sync=True)
+        pick = traitlets.Unicode("").tag(sync=True)
+        ctl = traitlets.Unicode("").tag(sync=True)
+
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.tile_fn = None  # async (src, z, x, y, year) -> PNG bytes or None
+            self.tile_times = {}  # (src, z, x, y, year) -> {"wait", "run"} ms, set by tile_fn
+            self.on_msg(self._on_custom)
+
+        def _on_custom(self, widget, content, buffers):
+            if not isinstance(content, dict) or content.get("kind") != "tile":
+                return
+            try:
+                asyncio.get_running_loop().create_task(self._tile(content, time.time()))
+            except RuntimeError as e:
+                self.send({"kind": "tile", "id": content.get("id"), "err": f"no loop: {e}"})
+
+        async def _tile(self, c, t_recv=None):
+            """A FAILURE IS AN ERROR, never an empty tile (deck caches an empty
+            tile as loaded and the area stays blank for good)."""
+            if self.tile_fn is None:
+                self.send({"kind": "tile", "id": c["id"], "err": "no tile_fn (re-run the wiring cell)"})
+                return
+            key = (c.get("src", "s2"), int(c["z"]), int(c["x"]), int(c["y"]), int(c["year"]))
+            t_run = time.time()
+            try:
+                png = await self.tile_fn(*key)
+            except Exception as e:
+                self.tile_times.pop(key, None)
+                self.send({"kind": "tile", "id": c["id"], "err": f"{type(e).__name__}: {e}"})
+                return
+            # timings for the tests: wall clock at receipt and at send, the
+            # loop's delay before the tile started, and tile_fn's own split
+            kt = {"recv": t_recv, "sent": time.time(), "loop": 1e3 * (t_run - t_recv) if t_recv else None, **self.tile_times.pop(key, {})}
+            if png is None:
+                self.send({"kind": "tile", "id": c["id"], "empty": True, "kt": kt})
+            else:
+                self.send({"kind": "tile", "id": c["id"], "kt": kt}, buffers=[png])
+
+        _css = r"""
+        .at{--glass:rgba(26,29,33,.92);--card:rgba(26,29,33,.8);--glass-hi:#23272c;--line:rgba(255,255,255,.12);--text:#e6e9ec;--muted:#9ba5af;--faint:rgba(255,255,255,.18);--cool:#56b4e9;--sel:rgba(255,255,255,.08);--on:#15181b;
+          position:relative;width:100%;background:#0e0e0e;color:var(--text);font:14px/1.45 "Instrument Sans",ui-sans-serif,system-ui,sans-serif;font-variant-numeric:tabular-nums;overflow:hidden;border-radius:10px;-webkit-font-smoothing:antialiased}
+        .at.fit{position:fixed;inset:0;z-index:9999;border-radius:0}
+        .at *{box-sizing:border-box}
+        .at-pane{position:relative;width:100%}
+        .at-map{position:absolute;inset:0}
+        .at-map.holding{cursor:ns-resize}
+        .at-map.holding.key{cursor:grab}
+        /* the pair (P): Sentinel-2 or Overture on the left, the map on the right, one camera */
+        .at-map2{position:absolute;top:0;bottom:0;left:0;right:50%;display:none;border-right:2px solid rgba(255,255,255,.35)}
+        .at.pair .at-map{left:50%}
+        .at.pair .at-map2{display:block}
+        .at.pair .at-msg{left:75%}
+        .at-side{position:absolute;left:50%;transform:translateX(-50%);bottom:56px;z-index:6;display:none;align-items:center;gap:12px;padding:6px 10px;font-size:12.5px;color:var(--muted);white-space:nowrap;max-width:calc(100% - 24px);overflow:hidden}
+        .at.pair .at-side{left:25%;bottom:40px;max-width:calc(50% - 24px);flex-wrap:wrap;justify-content:center;row-gap:4px;white-space:normal}
+        .at-side > *{white-space:nowrap}
+        .at-side.on{display:flex}
+        .at-side b{color:var(--text);font-weight:600}
+        .at-side i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+        .at-side i.ln{height:3px;vertical-align:2px}
+        .at-side button{font:inherit;font-size:11.5px;padding:2px 7px;border-radius:6px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer}
+        .at-side kbd,.at-yc kbd{font:10.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--line);border-radius:4px;padding:1px 4px}
+        .at-glass{background:var(--glass);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 22px rgba(0,0,0,.35)}
+        /* the cards a little see-through; the stronger blur keeps the text clear */
+        .at-panel.at-glass,.at-yc.at-glass,.at-side.at-glass{background:var(--card);backdrop-filter:blur(18px) saturate(1.15);-webkit-backdrop-filter:blur(18px) saturate(1.15)}
+        .at button{font:inherit;color:inherit}
+        .at button:focus-visible,.at input:focus-visible{outline:2px solid var(--cool);outline-offset:2px}
+        .at-top{position:absolute;left:12px;top:12px;z-index:6;display:flex;flex-direction:column;gap:8px;align-items:flex-start;max-width:calc(100% - 420px)}
+        .at-search{position:relative;z-index:2;display:flex;align-items:center;gap:8px;padding:0 12px;height:40px;width:270px}
+        .at-search svg{flex:0 0 auto;opacity:.6}
+        .at-search input{flex:1;min-width:0;background:none;border:0;color:var(--text);font:inherit;outline:none}
+        .at-search input::placeholder{color:var(--muted)}
+        .at-hits{position:absolute;left:-1px;right:-1px;top:46px;display:none;padding:4px;background:var(--glass-hi)}
+        .at-hit{padding:7px 10px;border-radius:8px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .at-hit small{display:block;color:var(--muted);font-size:12px}
+        .at-hit.sel{background:var(--sel)}
+        .at-panel{display:flex;flex-direction:column;gap:8px;padding:9px 11px;width:360px;max-width:calc(100vw - 32px);box-sizing:border-box}
+        .at-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+        .at-lab{font-size:12.5px;color:var(--muted);min-width:64px}
+        .seg-s,.seg-f{display:flex;gap:2px;padding:2px;border:1px solid var(--line);border-radius:9px;width:max-content}
+        .seg-s button,.seg-f button{border:0;background:none;color:var(--muted);padding:3px 10px;border-radius:7px;cursor:pointer}
+        .seg-s button:hover,.seg-f button:hover{color:var(--text)}
+        .seg-s button.on,.seg-f button.on{background:var(--text);color:var(--on)}
+        .seg-f{margin-bottom:6px;font-size:12.5px}
+        .seg-s.col{flex-direction:column;align-items:stretch}
+        .at-kinds{display:flex;flex-direction:column;gap:2px;width:100%}
+        .at-kinds button{display:flex;align-items:center;gap:7px;border:0;background:none;padding:2px 4px;border-radius:6px;cursor:pointer;text-align:left;color:var(--text);font-size:12.5px}
+        .at-kinds button:hover{background:var(--sel)}
+        .at-kinds button i{width:14px;height:14px;border-radius:3px;flex:none}
+        .at-kinds button span{color:var(--muted)}
+        .at-kinds button.off{opacity:.4}
+        .at button.wait{opacity:.4}
+        @keyframes at-ready{0%{box-shadow:0 0 0 0 rgba(86,180,233,.6)}100%{box-shadow:0 0 0 6px rgba(86,180,233,0)}}
+        .seg-s button.ready{animation:at-ready 1.2s ease-out 2}
+        .seg-s button.fresh{position:relative}
+        .seg-s button.fresh::before{content:"";position:absolute;top:4px;left:3px;width:5px;height:5px;border-radius:50%;background:var(--cool)}
+        .at-soon{justify-content:space-between;font-size:11.5px;color:var(--muted);margin-top:-4px}
+        .at-soon .z{font-variant-numeric:tabular-nums;color:var(--text)}
+        .at-kinds button.off i{background:none!important;border:1.5px dashed var(--muted)}
+        .at-kind-dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+        .seg-s.col button{text-align:left;display:flex;align-items:center;justify-content:space-between;gap:14px}
+        .seg-s kbd{font:11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:2px 5px}
+        .seg-f kbd{font:10.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:1px 4px;margin-left:3px}
+        .seg-f button.on kbd{color:var(--on);border-color:rgba(0,0,0,.35)}
+        .at-yc .yr .comp{display:block;font-weight:600;margin-bottom:2px}
+        .at-yc .yr .comps{display:flex;gap:4px;flex-wrap:wrap;margin:2px 0 5px}
+        .at-yc .yr .comps button{font:inherit;font-size:11.5px;padding:2px 7px;border-radius:6px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer}
+        .at-yc .yr .comps button.on{background:var(--text);color:var(--on);border-color:transparent}
+        .yr kbd{font:10.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--line);border-radius:4px;padding:1px 4px}
+        .seg-s button.on kbd{color:var(--on);border-color:rgba(0,0,0,.35)}
+        .at-row.top{align-items:flex-start}
+        .at-row.top .at-lab{padding-top:5px}
+        .at-hd{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:-2px -4px -2px 0}
+        .at-hd .t{font-size:12.5px;font-weight:600}
+        .at-cb{flex:0 0 auto;border:0;background:none;color:var(--muted);cursor:pointer;width:26px;height:26px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;padding:0}
+        .at-cb:hover{background:var(--sel);color:var(--text)}
+        .at-cb svg{transition:transform .15s}
+        .collapsed .at-cb svg{transform:rotate(-90deg)}
+        .at-panel.collapsed{padding:2px 3px 2px 10px;gap:0;border-radius:10px;width:auto}
+        .at-panel.collapsed .at-hd .t{font-size:12px}
+        .at-panel.collapsed .at-cb{width:22px;height:22px}
+        .at-panel.collapsed .at-row{display:none}
+        .at-yc .yr .at-cb{margin-left:auto;align-self:flex-start;margin-top:-4px;margin-right:-8px}
+        .at-yc.collapsed{width:auto}
+        .at-yc.collapsed .yr span{max-width:120px}
+        .at-yc.collapsed>:not(.yr){display:none}
+        .at-key{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;font-size:12.5px;color:var(--muted);flex:1 1 auto;min-width:0}
+        .at-key .why{flex-basis:100%;white-space:normal;font-size:11.5px;line-height:1.35}
+        .at-ramp{height:10px;border-radius:3px;width:150px}
+        .at-win{position:relative;width:170px;height:28px;flex:0 0 auto}
+        .at-win input{position:absolute;left:0;top:0;width:100%;height:22px;margin:0;background:none;pointer-events:none;-webkit-appearance:none;appearance:none}
+        .at-win input:focus{outline:none}
+        .at-win input::-webkit-slider-runnable-track{background:none;height:22px}
+        .at-win input::-moz-range-track{background:none;height:22px}
+        .at-win input::-webkit-slider-thumb{pointer-events:auto;-webkit-appearance:none;appearance:none;width:14px;height:14px;margin-top:4px;border-radius:50%;background:var(--text);border:2px solid var(--on);box-shadow:0 0 0 1px rgba(255,255,255,.3);cursor:grab}
+        .at-win input::-moz-range-thumb{pointer-events:auto;width:14px;height:14px;border-radius:50%;background:var(--text);border:2px solid var(--on);cursor:grab}
+        .at-win .trk{position:absolute;left:8px;right:8px;top:9px;height:4px;background:var(--faint);border-radius:2px}
+        .at-win .spn{position:absolute;top:9px;height:4px;background:var(--text);border-radius:2px}
+        .at-win .tks{position:absolute;left:8px;right:8px;top:19px;display:flex;justify-content:space-between;font-size:9px;color:var(--muted);line-height:1}
+        .at-win .tks span{width:0;display:flex;justify-content:center}
+        .at-win .tks i{font-style:normal}
+        .at-wtxt{font-size:12.5px;white-space:nowrap}
+        .at-tools{position:absolute;right:12px;top:12px;z-index:7;display:flex;gap:8px}
+        .at-btn{height:40px;min-width:40px;padding:0 13px;display:inline-flex;align-items:center;justify-content:center;gap:7px;cursor:pointer;white-space:nowrap}
+        .at-btn:hover{border-color:rgba(255,255,255,.3)}
+        .at-btn.on{background:var(--text);color:var(--on);border-color:var(--text)}
+        .at-bar{position:absolute;left:0;right:0;top:0;height:3px;z-index:9;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .3s}
+        .at-bar.busy{opacity:1}
+        .at-bar i{position:absolute;top:0;height:3px;width:28%;background:linear-gradient(90deg,transparent,var(--text),transparent);animation:at-run 1.2s ease-in-out infinite}
+        @keyframes at-run{0%{left:-28%}100%{left:100%}}
+        .at-msg{position:absolute;left:50%;transform:translateX(-50%);bottom:16px;z-index:5;font-size:13px;color:var(--muted);padding:6px 11px;display:none;max-width:min(520px,calc(100% - 24px))}
+        .at-msg.err{color:#e69f00;user-select:text}
+        .at-msg-act{display:none;gap:6px;margin-left:10px;vertical-align:middle}
+        .at-msg.err .at-msg-act{display:inline-flex}
+        .at-msg-act button{border:1px solid var(--line);background:none;color:var(--muted);cursor:pointer;border-radius:6px;padding:0 7px;font:12px/1.5 "Instrument Sans",ui-sans-serif,system-ui,sans-serif}
+        .at-msg-act button:hover{background:var(--sel);color:var(--text)}
+        .at-yc{position:absolute;right:12px;top:60px;z-index:6;width:380px;max-width:calc(100% - 24px);padding:14px 16px 12px;transform-origin:top right}
+        .at-yc .yr{display:flex;align-items:flex-end;gap:12px}
+        .at-yc .yr b{font-size:56px;line-height:.86;font-weight:600;letter-spacing:-.035em;font-stretch:88%}
+        .at-yc .yr span{font-size:12.5px;color:var(--muted);line-height:1.35;padding-bottom:2px}
+        .at-yc .yr.quiet{align-items:center}
+        .at-yc .yr.quiet span{padding-bottom:0}
+        .at-yc .yr.quiet .at-cb{margin-top:-2px;align-self:center}
+        .at-yc.holding .yr span{color:var(--text)}
+        .at-yc h4{margin:14px 0 2px;font-size:13.5px;font-weight:600}
+        .at-yc .sub{color:var(--muted);font-size:12.5px;margin:0 0 6px}
+        .at-yc .hex{border-top:1px solid var(--line);margin-top:12px;padding-top:12px;position:relative}
+        .at-yc .hex .place{color:var(--text);font-size:13px;font-weight:600;margin-bottom:2px;padding-right:28px}
+        .at-yc .hex .place span{font-weight:400;color:var(--muted)}
+        .at-yc .hex h3{margin:0 0 6px;font-size:16px;font-weight:600;letter-spacing:-.005em;padding-right:28px}
+        .at-yc .hex p{margin:0 0 8px}
+        .at-yc .coords{display:grid;grid-template-columns:1fr auto;gap:3px 8px;align-items:center;margin:6px 0 10px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}
+        .at-yc .coords code{user-select:all;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .at-yc .coords button{border:1px solid var(--line);background:none;color:var(--muted);cursor:pointer;border-radius:6px;padding:1px 7px;font:12px/1.5 "Instrument Sans",ui-sans-serif,system-ui,sans-serif}
+        .at-yc .coords button:hover{background:var(--sel);color:var(--text)}
+        .at-yc .x{position:absolute;right:-6px;top:6px;border:0;background:none;color:var(--muted);cursor:pointer;width:28px;height:28px;border-radius:8px;font-size:17px;line-height:1}
+        .at-yc .x:hover{background:var(--sel);color:var(--text)}
+        /* the hexagon's card: small, floating by the click, compact until More */
+        .at-yc.at-fc{display:none;right:auto;top:auto;width:300px;z-index:8;padding:10px 14px 9px;transform-origin:top left}
+        .at-yc.at-fc.more{width:360px;max-height:calc(100% - 24px);overflow:auto}
+        .at-fc .hex{border-top:0;margin-top:0;padding-top:0}
+        .at-fc:not(.more) .hex>:not(.x):not(.place):not(h3:last-child):not(h4):not(p),.at-fc:not(.more) .hex>p.sub{display:none}
+        .at-fc:not(.more) .hex h4{margin-top:2px}
+        .at-fc .fcbar{display:flex;align-items:center;gap:10px;margin-top:4px;font-size:12px;color:var(--muted)}
+        .at-fc .fcbar button{font:inherit;font-size:12px;padding:2px 9px;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
+        .at-fc .fcbar button:hover{background:var(--sel)}
+        .at-yc svg text{font-size:10.5px;fill:var(--muted)}
+        .at-yc svg .lbl{fill:var(--text);font-weight:600}
+        .at-lc{display:grid;grid-template-columns:1fr 120px 36px;gap:4px 8px;align-items:center;font-size:12.5px;margin:4px 0 6px}
+        .at-lc i{display:block;height:8px;border-radius:0 4px 4px 0;background:var(--text);opacity:.72}
+        .at-lc span:nth-child(3n){text-align:right;color:var(--muted)}
+        .at-tip{position:absolute;z-index:10;pointer-events:none;background:var(--glass-hi);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:12.5px;line-height:1.4;display:none;box-shadow:0 4px 14px rgba(0,0,0,.35);max-width:260px}
+        .at-more{position:absolute;right:12px;top:60px;z-index:8;width:300px;padding:8px;display:none}
+        .at-more .item{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 10px;border-radius:9px}
+        .at-more .item:hover{background:var(--sel)}
+        .at-more .item small{display:block;color:var(--muted);font-size:12px}
+        .at-more hr{border:0;border-top:1px solid var(--line);margin:4px 6px}
+        .at-chip{border:1px solid var(--line);background:var(--glass-hi);border-radius:999px;padding:4px 12px;cursor:pointer}
+        .at-chip:hover{border-color:rgba(255,255,255,.35)}
+        .at-sw{position:relative;width:34px;height:20px;flex:0 0 auto;border-radius:999px;background:rgba(255,255,255,.2);border:0;cursor:pointer;transition:background .2s}
+        .at-sw::after{content:"";position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:left .2s}
+        .at-sw.on{background:var(--cool)}
+        .at-sw.on::after{left:17px}
+        .at-more input[type=range]{width:120px;accent-color:var(--cool)}
+        .at-about{position:absolute;inset:0;z-index:20;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.5)}
+        .at-about .box{width:min(620px,calc(100% - 32px));max-height:calc(100% - 64px);overflow:auto;padding:22px 26px;line-height:1.55;background:var(--glass-hi)}
+        .at-about h2{margin:0 0 10px;font-size:22px;font-weight:600;letter-spacing:-.01em}
+        .at-about p{margin:0 0 10px;max-width:66ch}
+        .at-about small{color:var(--muted)}
+        .at .maplibregl-ctrl-group{border:1px solid var(--line);box-shadow:0 6px 22px rgba(0,0,0,.35);border-radius:10px;background:var(--glass)}
+        .at .maplibregl-ctrl-group button+button{border-top-color:var(--line)}
+        .at .maplibregl-ctrl button .maplibregl-ctrl-icon{filter:invert(1)}
+        .at .maplibregl-ctrl-attrib{background:var(--card);color:var(--muted)}
+        .at .maplibregl-ctrl-attrib a{color:var(--muted)}
+        .at .maplibregl-ctrl-attrib-button{filter:invert(1)}
+        @media (max-width:760px){.at-top{max-width:calc(100% - 24px)}.at-search{width:calc(100vw - 48px)}.at-yc{top:auto;bottom:12px;max-height:45%;overflow:auto}.at-tools{top:108px}}
+        @media (prefers-reduced-motion:reduce){.at-bar i{animation:none;left:0;width:100%}}
+        """
+
+        _esm = r"""
+        import maplibregl from "https://esm.sh/maplibre-gl@5.24.0";
+        import {MapboxOverlay} from "https://esm.sh/@deck.gl/mapbox@9.3.10?__DEPS__";
+        import {BitmapLayer, PathLayer} from "https://esm.sh/@deck.gl/layers@9.3.10?__DEPS__";
+        import {TileLayer, H3HexagonLayer} from "https://esm.sh/@deck.gl/geo-layers@9.3.10?__DEPS__";
+        import {COGLayer, MosaicLayer} from "https://esm.sh/@developmentseed/deck.gl-geotiff@0.8.0?__DEPS__";
+        import {CreateTexture} from "https://esm.sh/@developmentseed/deck.gl-raster@0.8.0/gpu-modules?__DEPS__";
+        import {DecoderPool, GeoTIFF, PerOriginSemaphore} from "https://esm.sh/@developmentseed/geotiff@0.8.0?__DEPS__";
+        import {latLngToCell, getResolution, cellToBoundary, cellToLatLng, isValidCell} from "https://esm.sh/h3-js@4.5.0";
+        import {Protocol as PMProtocol} from "https://esm.sh/pmtiles@4.5.0";
+        maplibregl.addProtocol("pmtiles", new PMProtocol().tile);
+
+        // dark basemap, trying it; light was
+        // https://basemaps.cartocdn.com/gl/positron-gl-style/style.json
+        const STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+        const FONTS = "https://fonts.googleapis.com/css2?family=Instrument+Sans:wdth,wght@75..100,400..700&display=swap";
+        const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+        const fmt = (n) => Number(n).toLocaleString("en-US");
+        const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+        const cap = (s) => s ? s[0].toUpperCase() + s.slice(1) : s;
+        // the model's "desert" class is Impact Observatory's bare ground: shown as that, everywhere
+        const showClass = (nm) => nm === "desert" ? "bare ground" : nm;
+        const INK = [230, 233, 236];
+
+        function bytesOf(v) {
+          if (!v) return null;
+          if (v instanceof DataView) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+          if (v instanceof ArrayBuffer) return new Uint8Array(v);
+          if (v.buffer) return new Uint8Array(v.buffer, v.byteOffset || 0, v.byteLength);
+          return null;
+        }
+        const copyOf = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+        const el_ = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+        const ICON = {
+          search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
+          more: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
+          expand: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
+          chev: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 9l6 6 6-6"/></svg>',
+          pair: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>',
+          shrink: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>',
+        };
+        // how much a hexagon moved, in words, from its 0..1 level in this view
+        const howMuch = (t) => t >= 0.75 ? "a lot" : t >= 0.4 ? "a fair amount" : t >= 0.15 ? "a little" : "barely";
+        const FAIR = 1 + Math.round(254 * 0.4);  // the level byte at "a fair amount"
+        const HB = 17;  // bytes per hexagon in hattrs (the 9th: 1 on built ground; 10 to 16 the model's; 17 earthwork, see _paint)
+        // All built, built classes only (the rest left empty), in the map's colors: other
+        // built-up light orange, road slate, building deep orange; nothing on red
+        const AB_RGB = {5: [240, 178, 122], 6: [140, 146, 158], 7: [200, 98, 15]};
+        // the year the model first reads built: cividis, dark blue to yellow, a
+        // lightness ramp on the blue to yellow axis with no red in it; the newest years
+        // brightest, so recent building stands out on the dark basemap
+        const YR_STOPS = ["2c4a7c", "3f5a7a", "5d6b76", "7f8279", "a19a73", "c6b564", "f0d84c"].map((h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)));
+        // the whole cividis over the window's own years (y0 dark blue, y1 yellow), one step a year
+        const yrCol = (y, y0, y1) => { const n = Math.max(1, y1 - y0); let t = Math.max(0, Math.min(1, (Math.round(y) - y0) / n)) * (YR_STOPS.length - 1); const i = Math.min(YR_STOPS.length - 2, Math.floor(t)), f = t - i; return YR_STOPS[i].map((v, j) => Math.round(v + (YR_STOPS[i + 1][j] - v) * f)); };
+        // WSF keeps its own ramp from the atlas notebook: YlOrBr less its near-white end
+        const WSF_STOPS = ["fee391", "fec44f", "fe9929", "ec7014", "cc4c02", "993404", "662506"].map((h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)));
+        const wsfCol = (y) => { let t = Math.max(0, Math.min(1, (y - 2016) / 9)) * (WSF_STOPS.length - 1); const i = Math.min(WSF_STOPS.length - 2, Math.floor(t)), f = t - i; return WSF_STOPS[i].map((v, j) => Math.round(v + (WSF_STOPS[i + 1][j] - v) * f)); };
+        const wsfYear = (k) => 2016 + ((k - 1) >> 1);
+        const MODEL_MODES = ["allbuilt", "struct", "first"];
+        // kinds of change, largest first: Okabe-Ito, made to stay apart for
+        // red-weak and other color vision; quiet ground (0) faint gray
+        const KIND_RGB = [[230, 159, 0], [86, 180, 233], [0, 158, 115], [240, 228, 66], [0, 114, 178], [204, 121, 167]];
+        const kindCss = (k) => `rgb(${KIND_RGB[(k - 1) % KIND_RGB.length].join(",")})`;
+        const lcPair = (a, b) => a === b ? `stays ${a}` : `${a} → ${b}`;
+        // [[year, class], ..] in runs: "<b>cropland</b> 2021 to 2022, then <b>built-up</b> 2023 to 2025"
+        function readRuns(rs) {
+          const out = [];
+          for (const [y, nm] of rs) {
+            const last = out[out.length - 1];
+            if (last && last.nm === nm && last.y1 === y - 1) last.y1 = y;
+            else out.push({nm, y0: y, y1: y});
+          }
+          return out.map((r) => `<b>${r.nm ? r.nm : "unread"}</b> ${r.y0 === r.y1 ? r.y0 : `${r.y0} to ${r.y1}`}`).join(", then ");
+        }
+        // the whole history, when read (zoomed in): codes from _trajectory
+        const HIST_WORD = {1: "one step, then held", 2: "came back", 3: "changes this much most years", 4: "kept changing after", 5: "too recent to tell"};
+        function histText(code, k, hy, ratio) {
+          if (code === 1) return `One step into ${k}, then it held through ${hy[1]}.`;
+          if (code === 2) return `It changed into ${k}, then came back: by ${hy[1]} it is closer to the ground before than to ${k}. Fields, water and seasons do this; buildings rarely do.`;
+          if (code === 3) return `It changes about this much most years${ratio != null ? ` (this step is ${ratio.toFixed(1)} times its usual step, ${hy[0]} to ${hy[1]})` : ""}: ground that turns over, like a field.`;
+          if (code === 4) return `It kept changing after ${k}, more than the usual step most years, the way a site still building out, a quarry or a mine does.`;
+          if (code === 5) return `The change is into ${hy[1]}, the last year AlphaEarth has: too recent to tell whether it holds.`;
+          return "";
+        }
+
+        function render({model, el}) {
+          let cfg = {};
+          try { cfg = JSON.parse(model.get("config") || "{}"); } catch (e) { cfg = {}; }
+          if (!document.getElementById("at-fonts")) {
+            const f = document.createElement("link"); f.id = "at-fonts"; f.rel = "stylesheet"; f.href = FONTS; document.head.appendChild(f);
+          }
+          const mlcss = document.createElement("link");
+          mlcss.rel = "stylesheet"; mlcss.href = "https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css";
+          el.appendChild(mlcss);
+
+          const S2Y = cfg.s2_years || [2022, 2023, 2024, 2025];
+          const VIR = (cfg.viridis || "440154fde725").match(/.{6}/g).map((h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)));
+          const vir = (t) => { t = Math.max(0, Math.min(1, t)) * (VIR.length - 1); const i = Math.min(VIR.length - 2, Math.floor(t)), f = t - i; return VIR[i].map((v, j) => Math.round(v + (VIR[i + 1][j] - v) * f)); };
+          const virCss = (n) => Array.from({length: n}, (_, i) => `rgb(${vir(i / (n - 1)).join(",")})`).join(",");
+          const A_FILL = cfg.alpha_fill || 235, A_QUIET = cfg.alpha_quiet || 70, A_DIM = 45;
+          const HEXZ = cfg.hex_zoom || 9, HOLD_MS = cfg.hold_ms || 200, SLOP = cfg.hold_slop || 5;
+          const st = {
+            gmode: "earth", want: "earth", hideKinds: new Set(), focus: "all", y0: cfg.aef_from || 2022, y1: cfg.aef_to || 2025,
+            imgYear: cfg.s2_year || S2Y[S2Y.length - 1], labels: true, s2scale: Number(cfg.s2_scale) || 1, s2comp: cfg.s2_comp || "tci",
+            fit: !!cfg.fit, holding: false,
+            // the pair (P) and its left side ("s2" or "ov")
+            pair: false, left: "s2",
+          };
+
+          // ---- the frame ----------------------------------------------------
+          const root = el_("div", "at");
+          const pane = el_("div", "at-pane");
+          const mapEl = el_("div", "at-map");
+          const mapEl2 = el_("div", "at-map2");
+          const bar = el_("div", "at-bar", "<i></i>");
+          // an error stays until the next status; copy takes its full text, x closes it
+          const msg = el_("div", "at-msg at-glass", '<span class="at-msg-t"></span><span class="at-msg-act"><button data-act="copy">copy</button><button data-act="x" title="Close">\u00d7</button></span>');
+          const msgTx = msg.querySelector(".at-msg-t");
+          msg.addEventListener("click", (e) => {
+            const b = e.target && e.target.closest && e.target.closest("button[data-act]");
+            if (!b) return;
+            e.stopPropagation();
+            if (b.getAttribute("data-act") === "x") { msg.style.display = "none"; return; }
+            const t = msgTx.textContent;
+            const done = () => { b.textContent = "copied"; setTimeout(() => { b.textContent = "copy"; }, 1200); };
+            const fallback = () => { const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0"; root.appendChild(ta); ta.select(); try { document.execCommand("copy"); done(); } catch (e2) {} ta.remove(); };
+            if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, fallback); else fallback();
+          });
+          pane.append(mapEl2, mapEl, bar, msg);
+          root.appendChild(pane);
+          el.appendChild(root);
+
+          // top left: search, and the one control row for the hexagons
+          const top = el_("div", "at-top");
+          const search = el_("div", "at-search at-glass", ICON.search);
+          const gc = el_("input"); gc.type = "search"; gc.placeholder = "Search a place or H3 string"; gc.autocomplete = "off"; gc.spellcheck = false;
+          const hits = el_("div", "at-hits at-glass");
+          search.append(gc, hits);
+          const panel = el_("div", "at-panel at-glass");
+          // every panel folds; the fold is remembered in this browser
+          const keep = (k, v) => { try { if (v === undefined) return localStorage.getItem("aef-lc-" + k) === "1"; localStorage.setItem("aef-lc-" + k, v ? "1" : "0"); } catch (e) {} return false; };
+          const panelHd = el_("div", "at-hd", `<span class="t">AEF Change</span>`);
+          const panelCb = el_("button", "at-cb", ICON.chev);
+          panelHd.appendChild(panelCb);
+          panel.appendChild(panelHd);
+          const foldPanel = (on) => { panel.classList.toggle("collapsed", on); panelCb.title = on ? "show the controls" : "fold the controls"; keep("panel", on); };
+          panelCb.onclick = (e) => { e.stopPropagation(); foldPanel(!panel.classList.contains("collapsed")); };
+          foldPanel(keep("panel"));
+          const rowOf = (label) => { const r = el_("div", "at-row"); if (label) r.appendChild(el_("span", "at-lab", label)); panel.appendChild(r); return r; };
+          // Kinds of change is drawn only zoomed in with its land cover read (hmeta.kinds_ready), and only
+          // once asked for: the map never switches to it by itself, its button flashes when it is ready
+          //
+          const kindsWait = () => st.want === "kinds" && !hmeta.kinds_ready;
+          const drawnMode = () => kindsWait() ? "much" : st.want;
+          const segOf = (row, items, isOn, onClick) => {
+            const seg = el_("div", "seg-s col");
+            const bs = items.map(([k, label, title, key]) => { const b = el_("button", "", label); b.title = title ? title + (key ? " (" + key + ")" : "") : ""; if (key) b.appendChild(el_("kbd", "", key)); b.onclick = () => onClick(k); seg.appendChild(b); return b; });
+            row.appendChild(seg);
+            return () => items.forEach(([k], i) => bs[i].classList.toggle("on", isOn(k)));
+          };
+          const rFill = rowOf("Color by");
+          rFill.classList.add("top");
+          // KINDS OF CHANGE COMMENTED OUT: AEF Change on built ground only
+          const styleSeg = segOf(rFill, [["earth", "Earthwork", "the chance the ground itself moved (dug, filled, graded) between the first and last year read: a model taught by 3DEP repeat lidar", "E"],
+                                          /* ["kinds", "Kinds of change", "the ground that moved most, grouped by the way it moved: the same color changed the same way. Click a kind in the key to hide or show it", "A"], */
+                                          ["much", "AEF Change", "how far the ground's AlphaEarth numbers moved between the first and last year read, nothing trained in between (on built ground only)", "A"],
+                                          ["ov", "Overture", "Overture in the hexagons' place: land use, roads, buildings", "O"],
+                                          ["wsf", "WSF", "the World Settlement Footprint on its own: settlement by the year each 10 m pixel first read built, at any zoom", "W"],
+                                          ...(cfg.models ? [["allbuilt", "All built", "other built-up, road and building, from the shared models run on every 10 m pixel and refined in the view", ""],
+                                          ["struct", "Structure reading", "the chance a structure stands on or touches the ground, from the height implicit in AlphaEarth", "R"],
+                                          ["first", "First year built", "the first year read in which the model calls the hexagon built", "Y"]] : [])],
+                                  (k) => k === st.gmode, (k) => { if (k === "kinds" && !hmeta.kinds_ready) return; st.want = k; st.gmode = drawnMode(); recolorHex(); styleRows(); renderYear(); update(); });
+          // while Kinds of change waits: its button grayed, and a line under it with the zoom it
+          // appears at and the zoom now
+          const rSoon = rowOf("");
+          rSoon.classList.add("at-soon");
+          const soonTxt = el_("span", "t"), soonZ = el_("span", "z");
+          rSoon.append(soonTxt, soonZ);
+          const styleSoon = () => {
+            const z = map ? map.getZoom() : 0, KZ = cfg.kinds_zoom || 11.8;
+            const OZ = hmeta.otf_zoom || 13, model = MODEL_MODES.includes(st.gmode);
+            const show = st.gmode !== "wsf" && st.gmode !== "ov" && st.gmode !== "earth" && z >= HEXZ && (model ? (z < OZ || hmeta.otf_pending) : !hmeta.kinds_ready);
+            rSoon.style.display = show ? "" : "none";
+            if (!show) return;
+            // what reads the ground now: zoomed out the view's land cover reader, from the 10 m read the shared models
+            if (model) soonTxt.textContent = hmeta.otf_pending ? "The model: running on this view" : `The model runs on every 10 m pixel from zoom ${OZ}`;
+            else soonTxt.textContent = z < KZ ? `Built ground read from ESA WorldCover 2021 until zoom ${KZ}` : "Built ground: reading the land cover";
+            soonZ.textContent = `zoom ${z.toFixed(1)}`;
+          };
+          // the moment Kinds of change is ready, a soft ring on its button, twice; and a small dot on it while
+          // it is ready but AEF Change is the one chosen
+          let kindsWaited = false;
+          const styleFill = () => {
+            styleSeg();
+            // the Kinds of change button's wait / ready cues, out with it
+            // const b = rFill.querySelector("button"), ready = !!hmeta.kinds_ready;
+            // b.classList.toggle("wait", !ready);
+            // if (ready && kindsWaited) { b.classList.remove("ready"); void b.offsetWidth; b.classList.add("ready"); }
+            // kindsWaited = !ready;
+            // b.classList.toggle("fresh", ready && st.want !== "kinds");
+            styleSoon();
+          };
+          const rKey = rowOf("");
+          rKey.classList.add("keep");
+          const keyEl = el_("span", "at-key");
+          rKey.appendChild(keyEl);
+          // the window: the years AlphaEarth is read over; drag either end, it rereads on release
+          const rWin = rowOf("Years read");
+          const aefYears = cfg.aef_years || [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025];
+          const win = el_("span", "at-win");
+          const wTrk = el_("span", "trk"), wSpn = el_("span", "spn"), wTks = el_("span", "tks");
+          for (const y of aefYears) wTks.appendChild(el_("span", "", `<i>’${String(y).slice(-2)}</i>`));
+          const mkR = () => { const r = el_("input"); r.type = "range"; r.min = 0; r.max = aefYears.length - 1; r.step = 1; r.title = "the years AlphaEarth is read over: drag either end, it rereads when you let go"; return r; };
+          const rFrom = mkR(), rTo = mkR();
+          const wTxt = el_("span", "at-wtxt");
+          win.append(wTrk, wSpn, wTks, rFrom, rTo);
+          rWin.append(win, wTxt);
+          function styleWin() {
+            const i0 = Math.max(0, aefYears.indexOf(st.y0)), i1 = Math.max(0, aefYears.indexOf(st.y1)), n = Math.max(1, aefYears.length - 1);
+            rFrom.value = i0; rTo.value = i1;
+            rFrom.style.zIndex = i0 === n ? 3 : 2; rTo.style.zIndex = i1 === 0 ? 3 : 2;
+            const usable = (win.clientWidth || 170) - 16;
+            wSpn.style.left = (8 + usable * i0 / n) + "px"; wSpn.style.width = (usable * (i1 - i0) / n) + "px";
+            wTxt.textContent = `${st.y0} to ${st.y1}`;
+          }
+          const onDrag = (which) => {
+            let a = Number(rFrom.value), b = Number(rTo.value);
+            if (a >= b) { if (which === "from") a = b - 1; else b = a + 1; }
+            a = Math.max(0, a); b = Math.min(aefYears.length - 1, b);
+            st.y0 = aefYears[a]; st.y1 = aefYears[b]; styleWin();
+          };
+          let winSent = [st.y0, st.y1];
+          const winRelease = () => { if (st.y0 !== winSent[0] || st.y1 !== winSent[1]) { winSent = [st.y0, st.y1]; send("aef"); update(); } };
+          rFrom.addEventListener("input", () => onDrag("from")); rTo.addEventListener("input", () => onDrag("to"));
+          rFrom.addEventListener("change", winRelease); rTo.addEventListener("change", winRelease);
+          try { new ResizeObserver(styleWin).observe(win); } catch (e) {}
+          function styleKey() {
+            const y0 = hmeta.y0 || st.y0, y1 = hmeta.y1 || st.y1;
+            const out_ = map && map.getZoom() < HEXZ;
+            // the title is what is drawn, open or folded
+            panelHd.querySelector(".t").textContent = {earth: "Earthwork", wsf: "WSF", ov: "Overture", kinds: "Kinds of change", much: "AEF Change", allbuilt: "All built", struct: "Structure reading", first: "First year built"}[st.gmode] || "AEF Change";
+            styleSoon();
+            if (st.gmode === "ov") {
+              const d = (c, t) => `<span><i class="at-kind-dot" style="background:${c}"></i>${t}</span>`;
+              keyEl.innerHTML = d(OV_C.bld, "buildings") + d(OV_C.road, "roads") + d("rgba(230,159,0,.7)", "construction, quarries, landfill") + d("rgba(155,165,175,.55)", "residential, industrial")
+                + `<span class="why">Overture ${esc(OV_PM.split("/").pop())} in the hexagons' place.</span>`;
+              return;
+            }
+            if (st.gmode === "wsf") {
+              keyEl.innerHTML = `<span><i class="at-kind-dot" style="background:rgb(150,158,166)"></i>by mid 2016</span> 2016 <i class="at-ramp" style="background:linear-gradient(90deg,${[2016, Math.round((2016 + y1) / 2), y1].map((y) => `rgb(${wsfCol(y).join(",")})`).join(",")})"></i> ${y1}<span class="why">World Settlement Footprint (DLR, MindEarth): each 10 m pixel by the half-year it first read as settlement, up to the last year read. Its own data, not the model.</span>`;
+              return;
+            }
+            if (out_) {
+              keyEl.innerHTML = `<span class="why">Zoom in to ${HEXZ} for the hexagons.</span>`;
+              return;
+            }
+            if (st.gmode === "kinds") {
+              const ks = hmeta.kinds || [];
+              const FOC = [["all", "All", "every hexagon in full", "Q"], ["built", "Built", "full only where the land cover changed and was built-up, road or construction in some year", "W"]];
+              let h = `<div class="seg-f">` + FOC.map(([k, t, tip, key]) => `<button data-focus="${k}" class="${st.focus === k ? "on" : ""}" title="${tip} (${key})">${t} <kbd>${key}</kbd></button>`).join("") + `</div><div class="at-kinds">`;
+              ks.forEach((q, j) => {
+                const k = j + 1, off = st.hideKinds.has(k);
+                h += `<button data-kind="${k}" class="${off ? "off" : ""}" title="${off ? "show" : "hide"} kind ${k}"><i style="background:${kindCss(k)}"></i><b>${k}</b><span>${fmt(q.n)}${q.year ? `, most ${q.year}` : ""}${q.from ? `, ${lcPair(q.from, q.to)}` : ""}</span></button>`;
+              });
+              h += `</div><span class="why">The ground that moved most from ${y0} to ${y1}, grouped by the way it moved: one color, one way of changing. Beside each: hexagons, the most common year, and what AlphaEarth reads most of it as in ${y0} and in ${y1}, taught in this view by ${esc(hmeta.lc_source || "land cover maps")}. Click one to hide it.</span>`;
+              keyEl.innerHTML = h;
+              keyEl.querySelectorAll("[data-focus]").forEach((b) => { b.onclick = (e) => { e.stopPropagation(); st.focus = b.dataset.focus; recolorHex(); styleKey(); update(); }; });
+              keyEl.querySelectorAll("[data-kind]").forEach((b) => { b.onclick = (e) => { e.stopPropagation(); const k = +b.dataset.kind; st.hideKinds.has(k) ? st.hideKinds.delete(k) : st.hideKinds.add(k); recolorHex(); renderYear(); styleKey(); update(); }; });
+              return;
+            }
+            const sw_ = (c, t) => `<span><i class="at-kind-dot" style="background:rgb(${c.join(",")})"></i>${t}</span>`;
+            const wsfK = "";
+            const src = hmeta.otf ? `<span class="why">The shared models on every 10 m pixel, refined in the view by its live teachers (${esc(Object.keys(hmeta.otf.teachers || {}).join(", "))}); land cover from ${esc(hmeta.otf.lc_source || "")}. Click a hexagon for its account.</span>` : `<span class="why">Zoom in to ${hmeta.otf_zoom || 13} to run the model here.</span>`;
+            if (st.gmode === "allbuilt") { keyEl.innerHTML = sw_(AB_RGB[5], "other built-up") + sw_(AB_RGB[6], "road") + sw_(AB_RGB[7], "building") + `<span class="why">In ${y1}, every hexagon whose ground most reads as other built-up, road or building.</span>` + src + wsfK; return; }
+            if (st.gmode === "struct") { keyEl.innerHTML = `50% <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> 100%<span class="why">Only where a structure stands: the mean chance a structure stands on or touches each 10 m of it, ${y1}.</span>` + src + wsfK; return; }
+            if (st.gmode === "first") { keyEl.innerHTML = Array.from({length: y1 - y0 + 1}, (_, k) => y0 + k).map((y) => sw_(yrCol(y, y0, y1), y === y0 ? `${y} or before` : `${y}`)).join("") + `<span class="why">Only where a structure stands: the first year read in which half of it or more reads built (other built-up, road or building).</span>` + src + wsfK; return; }
+            if (st.gmode === "earth") { keyEl.innerHTML = `Ground moved, ${y0} to ${y1}: unlikely <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> likely<span class="why">The chance the ground itself was dug, filled or graded, from AlphaEarth's ${y0} and ${y1} by a model taught on 3DEP repeat lidar. Each hexagon shows its highest-scoring patch.</span>`; return; }
+            keyEl.innerHTML = `Built ground (built-up, road or construction in ${y1}): barely <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> a lot, ${y0} to ${y1}` + wsfK;
+          }
+          function styleRows() { styleFill(); styleWin(); styleKey(); }
+          top.append(search, panel);
+          pane.appendChild(top);
+
+          // top right: settings and fill the window, then the year card
+          const tools = el_("div", "at-tools");
+          const bMore = el_("button", "at-btn at-glass", ICON.more); bMore.title = "settings and about";
+          const bFit = el_("button", "at-btn at-glass", ICON.expand); bFit.title = "fill the window (X); full screen (F)";
+          const bPair = el_("button", "at-btn at-glass", ICON.pair); bPair.title = "pair the map with Sentinel-2 or Overture (P)";
+          bPair.onclick = () => setPair(!st.pair);
+          tools.append(bPair, bMore, bFit);
+          pane.appendChild(tools);
+          const yc = el_("div", "at-yc at-glass");
+          // the hexagon's card, floating by the click (see renderFc)
+          const fc = el_("div", "at-yc at-fc at-glass");
+          pane.appendChild(yc);
+          pane.appendChild(fc);
+          const tip = el_("div", "at-tip");
+          pane.appendChild(tip);
+          // what the left side of the pair shows (or Overture, when it is the Color by), with its key
+          const side = el_("div", "at-side at-glass");
+          pane.appendChild(side);
+          const OV_PM = cfg.ov_pm || "https://tiles.overturemaps.org/2026-09-23.1";
+          const OV_C = {bld: "#56b4e9", road: "#e6e9ec", site: "#e69f00", built: "#9ba5af"};
+          const OV_LAYERS = [
+            {id: "ov-lu-built", type: "fill", source: "ov-base", "source-layer": "land_use",
+             filter: ["in", ["get", "class"], ["literal", ["residential", "industrial"]]], paint: {"fill-color": OV_C.built, "fill-opacity": 0.16}},
+            {id: "ov-lu-site", type: "fill", source: "ov-base", "source-layer": "land_use",
+             filter: ["all", ["!=", ["get", "class"], "greenfield"], ["any", ["in", ["get", "subtype"], ["literal", ["construction", "resource_extraction"]]], ["==", ["get", "class"], "landfill"]]],
+             paint: {"fill-color": OV_C.site, "fill-opacity": 0.4}},
+            {id: "ov-rail", type: "line", source: "ov-tr", "source-layer": "segment", filter: ["==", ["get", "subtype"], "rail"],
+             paint: {"line-color": OV_C.built, "line-width": 1.2, "line-dasharray": [2, 2]}},
+            {id: "ov-road", type: "line", source: "ov-tr", "source-layer": "segment", filter: ["==", ["get", "subtype"], "road"], layout: {"line-cap": "round", "line-join": "round"},
+             paint: {"line-color": OV_C.road, "line-opacity": 0.75, "line-width": ["interpolate", ["exponential", 1.6], ["zoom"],
+               10, ["match", ["get", "class"], ["motorway", "trunk"], 1.6, ["primary", "secondary"], 1.0, 0.4],
+               16, ["match", ["get", "class"], ["motorway", "trunk"], 9, ["primary", "secondary"], 6, "tertiary", 4, 2.5]]}},
+            {id: "ov-bld", type: "fill", source: "ov-bld", "source-layer": "building", paint: {"fill-color": OV_C.bld, "fill-opacity": 0.8, "fill-outline-color": "#b3dcf3"}},
+          ];
+          const ovShown = new Map();
+
+          const more = el_("div", "at-more at-glass");
+          const item = (title, sub, ctl) => { const r = el_("div", "item"); r.append(el_("div", "", `${title}${sub ? `<small>${sub}</small>` : ""}`), ctl); more.appendChild(r); return r; };
+          const sw = (get, set) => { const b = el_("button", "at-sw"); b.setAttribute("role", "switch"); const sty = () => { b.classList.toggle("on", !!get()); b.setAttribute("aria-checked", String(!!get())); }; b.onclick = () => { set(!get()); sty(); }; sty(); b.sty = sty; return b; };
+          const gam = el_("input"); gam.type = "range"; gam.min = 0.3; gam.max = 2.5; gam.step = 0.1; gam.value = st.s2scale;
+          gam.title = "imagery brightness (gamma); double-click for 1.0";
+          let gamT = null;
+          gam.oninput = () => { st.s2scale = Number(gam.value); clearTimeout(gamT); gamT = setTimeout(() => send("s2scale"), 250); };
+          gam.ondblclick = () => { gam.value = 1; gam.oninput(); };
+          item("Imagery brightness", "; and ' step it", gam);
+          // the imagery colors (S2_COMPOSITES in the kernel): false colors from the raw bands,
+          // stretched for the view, where the true color image clips bright ground
+          const COMPS = [["tci", "True color", "Earth Genome's true color image"],
+                         ["urban", "Urban", "B12 B11 B4 from the raw bands, each stretched to the view: built ground and bare soil apart by hue"],
+                         ["blueyellow", "Blue-yellow", "B11 B11 B2 from the raw bands, each stretched to the view: sand yellow, concrete blue"]];
+          // what the hold card calls each, always shown while the imagery is up
+          const COMP_NAME = {tci: "True color (TCI)", urban: "False color: Urban (B12 B11 B4)", blueyellow: "False color: Blue-yellow (B11 B11 B2)"};
+          const compBox = el_("div");
+          const styleComp = segOf(compBox, COMPS.map(([k, l, t]) => [k, l, t, ""]), (k) => k === st.s2comp, (k) => setComp(k));
+          function setComp(k) { st.s2comp = k; send("s2comp", {comp: k}); styleComp(); renderYear(); }
+          item("Imagery colors", "C steps them", compBox);
+          const swLab = sw(() => st.labels, (v) => { st.labels = v; labels(v); });
+          item("Place names", "", swLab);
+          more.appendChild(el_("hr"));
+          const bAbout = el_("button", "at-chip", "About this map"); bAbout.style.margin = "4px 10px 6px";
+          more.appendChild(bAbout);
+          pane.appendChild(more);
+
+          const about = el_("div", "at-about");
+          about.innerHTML = `<div class="box at-glass">
+            <h2>Built-up ground on the fly</h2>
+            <p><b>Earthwork</b> (E) is the chance the ground itself was dug, filled or graded between the first and last year read: a model on AlphaEarth taught where 3DEP lidar flew the same ground twice. Each hexagon shows its highest-scoring finer cell, so a single dig stands out. Pair (P) with Sentinel-2 to see what it is.</p>
+            <p>One layer at a time, picked in Color by. <b>WSF</b> (W) works at every zoom: the settlement extent by the year each 10 m pixel first read built, 2016 to the end of the years read.</p>
+            <p>The other modes are <b>AlphaEarth</b> in H3 hexagons, from zoom ${HEXZ}. From zoom ${cfg.otf_zoom || 13}, where AlphaEarth is read at 10 m, the <b>shared models</b> run on every pixel of the view: the <b>structure reading</b> (the chance a structure stands on or touches the ground, from the height implicit in AlphaEarth) and <b>All built</b> (other built-up, road, building, and the natural classes), refined by the view's own live teachers: Overture roads and footprints, WSF built-up away from both, and Impact Observatory's steady natural classes. Each answer is kept, for the view it last ran on, in H3 res 13 cells, and every hexagon is made from those, so the zoom levels agree. Only what is in view is read. Hexagons reach res 13 zoomed in.</p>
+            <p><b>Color by</b>: WSF (W), AEF Change (S), All built (A), Structure reading (R), First year built (Y). <b>Click</b> a hexagon for the model's account of it: its classes, structure, ground, built share by year, WSF, footprints, and how well the view's own fit did on teachers held out by block.</p>
+            <p><b>Hold space</b> to see the Sentinel-2 yearly imagery (Earth Genome, 2022 to 2025) instead of the hexagons; scroll while holding to step through the years.</p>
+            <p><small>Keys: E Earthwork, A AEF Change, O Overture, W WSF; hold space for the imagery, scroll or [ and ] for its year, B its first year or its latest; P pairs the map with Sentinel-2 (paired, O cycles the right map: AEF Change, Overture, WSF); F full screen; ; and ' its brightness; - = and _ + the years read; L place names; / search (a place, or paste an H3 string); X fill the window; Esc close.</small></p>
+            <p><small>WSF Tracker (c) DLR and MindEarth, via Source Cooperative. Overture Maps buildings, transportation and base, from Overture's PMTiles (ODbL; buildings also credit Microsoft, Google and Esri Community Maps).</small></p>
+            <p><small>AlphaEarth Foundations by Google and Google DeepMind (CC BY 4.0). ESA WorldCover 10 m 2021 v200, contains modified Copernicus Sentinel data processed by the ESA WorldCover consortium (CC BY 4.0). Impact Observatory, Microsoft and Esri 10 m annual land use and land cover v02, via Microsoft Planetary Computer (CC BY 4.0). Overture Maps transportation and land use, &copy;&nbsp;OpenStreetMap contributors (ODbL), from Overture's PMTiles. Sentinel-2 mosaics by Earth Genome (CC BY 4.0). Place names from Overture Maps divisions, &copy;&nbsp;OpenStreetMap contributors, Overture Maps Foundation (ODbL), with geoBoundaries, Esri Community Maps contributors and LINZ (CC BY 4.0): the PMTiles and, via Source Cooperative, fused/overture. Search by Photon over OpenStreetMap (ODbL). Basemap by Carto.</small></p>
+            <div style="margin-top:12px"><button class="at-chip">Close</button></div></div>`;
+          pane.appendChild(about);
+          about.querySelector("button").onclick = () => { about.style.display = "none"; };
+          about.onclick = (e) => { if (e.target === about) about.style.display = "none"; };
+          bAbout.onclick = () => { more.style.display = "none"; about.style.display = "flex"; };
+
+          const send = (act, extra) => {
+            model.set("ctl", JSON.stringify(Object.assign({act, s2scale: st.s2scale, y0: st.y0, y1: st.y1, n: Date.now()}, extra || {})));
+            model.save_changes();
+          };
+
+          // ---- status ------------------------------------------------------------
+          const ERR = /failed|error|no match|search:|timed? ?out|zoom in|^(deck|map|load|boot|\w+ tile):/i;
+          let msgT = null;
+          const note = (t, ms) => { msgTx.textContent = t; msg.style.display = t ? "block" : "none"; msg.classList.toggle("err", ERR.test(t)); clearTimeout(msgT); if (ms) msgT = setTimeout(() => { msg.style.display = "none"; }, ms); };
+          const say = (t) => {
+            t = (t || "").replace(/​/g, "");
+            if (ERR.test(t)) { note(t); bar.classList.remove("busy"); return; }
+            const busy = t.split(" | ").filter((p) => p.includes("…"));
+            const names = [];
+            // each dataset being read, by name, once
+            for (const p of busy)
+              for (const [nm, re] of [["AlphaEarth", /AlphaEarth/], ["WorldCover", /WorldCover/], ["Impact Observatory", /Impact Observatory/], ["Overture", /Overture/], ["WSF", /WSF/], ["the model", /^the model|fitting/]])
+                if (re.test(p) && !names.includes(nm)) names.push(nm);
+            bar.classList.toggle("busy", names.length > 0);
+            note(names.length ? "Loading " + (names.length > 1 ? names.slice(0, -1).join(", ") + " and " + names[names.length - 1] : names[0]) + "…" : "");
+          };
+
+          // ---- tiles ----------------------------------------------------------------
+          const pending = new Map();
+          let tseq = 0;
+          const tstat = {asked: 0, got: 0, empty: 0, err: 0, abort: 0};
+          const tlog = [];  // per tile, for the tests: asked, arrived, kernel times, bytes
+          const tlogOf = new Map();
+          model.on("msg:custom", (m, buffers) => {
+            if (!m || m.kind !== "tile") return;
+            const p = pending.get(m.id);
+            if (!p) return;
+            pending.delete(m.id);
+            const lg = tlogOf.get(m.id);
+            if (lg) { lg.got = Date.now(); lg.kt = m.kt || null; lg.bytes = buffers && buffers.length ? (buffers[0].byteLength || 0) : 0; lg.err = m.err || null; tlogOf.delete(m.id); }
+            if (m.err) { tstat.err++; p.reject(new Error(m.err)); return; }
+            if (m.empty || !buffers || !buffers.length) { tstat.empty++; p.resolve(null); return; }
+            tstat.got++;
+            p.resolve(bytesOf(buffers[0]));
+          });
+          const ask = (src, year, index, signal) => new Promise((resolve, reject) => {
+            const id = ++tseq; tstat.asked++;
+            pending.set(id, {resolve, reject});
+            const lg = {id, src, year, z: index.z, x: index.x, y: index.y, asked: Date.now()};
+            tlog.push(lg); tlogOf.set(id, lg); if (tlog.length > 4000) tlog.splice(0, 1000);
+            model.send({kind: "tile", id, src, year, x: index.x, y: index.y, z: index.z});
+            if (signal) signal.addEventListener("abort", () => { if (pending.has(id)) lg.aborted = Date.now(); tlogOf.delete(id); pending.delete(id); tstat.abort++; const e = new Error("aborted"); e.name = "AbortError"; reject(e); });
+          });
+          const pngBitmap = (u8) => createImageBitmap(new Blob([u8], {type: "image/png"}));
+
+          // ---- the hexagons -----------------------------------------------------------
+          let hexes = [], N = 0, res = -1, hexIndex = new Map(), hattrs = null, hmeta = {}, hcol = null, hcol32 = null, hexSeq = 0, hover = null, picked = null, imgPick = null;
+          function recolorHex() {
+            if (!N || !hattrs || hattrs.length !== HB * N) { hcol = null; hcol32 = null; return; }
+            hcol = new Uint8Array(4 * N);
+            hcol32 = new Uint32Array(hcol.buffer);
+            for (let i = 0; i < N; i++) {
+              const a8 = HB * i, o = 4 * i, lv = hattrs[a8 + 1];
+              let col, a;
+              if (st.gmode === "wsf" || st.gmode === "ov") continue;
+              if (st.gmode === "earth") {
+                // the chance the ground moved, on all ground: quiet ground faint, likely earthwork in full ink
+                const v = hattrs[a8 + 16];
+                if (!v) continue;
+                const t = (v - 1) / 254;
+                col = vir(t); a = Math.round(A_QUIET + (A_FILL - A_QUIET) * t);
+              } else if (st.gmode === "kinds") {
+                // its kind's color, fuller the more it moved; quiet ground faint gray
+                if (!lv) continue;
+                const kd = hattrs[a8 + 6], t = (lv - 1) / 254;
+                if (!kd) { col = [150, 156, 162]; a = 40; }
+                else if (st.hideKinds.has(kd)) continue;
+                else {
+                  col = KIND_RGB[(kd - 1) % KIND_RGB.length]; a = Math.round(110 + (A_FILL - 110) * t);
+                  // the key's Built: all but built-up, road and construction
+                  // that changed made more see-through
+                  if (st.focus === "built" && hattrs[a8 + 7] !== 3) a = A_DIM;
+                }
+              } else if (MODEL_MODES.includes(st.gmode)) {
+                // the model's answer where the store covers the hexagon; All built falls back to
+                // the view's land cover reader (faint) where it does not
+                const cov = hattrs[a8 + 15];
+                // Structure reading and First year built are clipped to structures: only hexagons
+                // most of whose 10 m ground reads standing (the structure reading at 50% or more).
+                // All built is not: roads and flat built ground never read standing
+                if (!cov || (st.gmode !== "allbuilt" && hattrs[a8 + 13] !== 1)) continue;
+                if (st.gmode === "allbuilt") {
+                  const c = hattrs[a8 + 9]; if (!AB_RGB[c]) continue; col = AB_RGB[c]; a = Math.round(120 + (A_FILL - 120) * hattrs[a8 + 10] / 255);
+                } else if (!cov) continue;
+                else if (st.gmode === "struct") { const v = hattrs[a8 + 12]; if (v > 100) continue; col = vir(Math.max(0, (v - 50) / 50)); a = A_FILL; }
+                else { const fy = hattrs[a8 + 14]; if (!fy) continue; col = yrCol(2000 + fy, hmeta.y0 || st.y0, hmeta.y1 || st.y1); a = A_FILL; }
+              } else {
+                // built ground only (BUILT_SHARE in the kernel)
+                if (!lv || !hattrs[a8 + 8]) continue;
+                const t = (lv - 1) / 254;
+                // quiet ground faint, change in full ink
+                col = vir(t); a = Math.round(A_QUIET + (A_FILL - A_QUIET) * t);
+              }
+              hcol[o] = col[0]; hcol[o + 1] = col[1]; hcol[o + 2] = col[2]; hcol[o + 3] = a;
+            }
+            hexSeq++;
+          }
+          const hexAt = (ll) => { if (res < 0 || !map || map.getZoom() < HEXZ) return -1; try { const h = latLngToCell(ll.lat, ll.lng, res); const i = hexIndex.get(h); return i == null || st.gmode === "wsf" || st.gmode === "ov" || (st.gmode === "much" && hattrs && !hattrs[HB * i + 8]) ? -1 : i; } catch (e) { return -1; } };
+          function hexWords(i) {
+            const o = HB * i, yb = hattrs[o], lv = hattrs[o + 1];
+            if (!lv) return "No AlphaEarth data here.";
+            if (st.gmode === "earth") {
+              const v = hattrs[o + 16];
+              return v ? `<b>Earthwork ${Math.round(100 * (v - 1) / 254)}%</b>: the chance the ground itself was dug, filled or graded, ${hmeta.y0 || st.y0} to ${hmeta.y1 || st.y1}` : "No AlphaEarth data here.";
+            }
+            let s;
+            if (MODEL_MODES.includes(st.gmode)) {
+              const cov = hattrs[o + 15], y1 = hmeta.y1 || st.y1;
+              if (!cov) return `The model has not run here yet: it runs from zoom ${hmeta.otf_zoom || 13}.`;
+              const cls = hattrs[o + 9], sv = hattrs[o + 12], g = hattrs[o + 13], fy = hattrs[o + 14];
+              const nm = (hmeta.otf_classes || [])[cls - 1] || "unread";
+              // one voice per layer, as the card
+              if (st.gmode === "struct") return sv <= 100 ? `<b>Structure ${sv}%</b> in ${y1}` : "No AlphaEarth here.";
+              if (st.gmode === "first") return fy ? `<b>Built from ${2000 + fy}${2000 + fy === (hmeta.y0 || st.y0) ? " or before" : ""}</b>` : "<b>Not read built</b> in the years read";
+              return `<b>${cap(showClass(nm))}</b> in ${y1}, ${Math.round(100 * hattrs[o + 10] / 255)}% built`;
+            }
+            if (st.gmode === "kinds") {
+              const kd = hattrs[o + 6];
+              s = kd ? `<b>Kind ${kd}</b>, changed ${howMuch((lv - 1) / 254)}${yb ? `, most in ${2000 + yb}` : ""}` : `<b>Not grouped</b>: changed ${howMuch((lv - 1) / 254)}, less than the ground that moved most`;
+              if (hattrs[o + 4]) s += `<br>History: ${HIST_WORD[hattrs[o + 4]]}`;
+            } else {
+              s = `<b>Changed ${howMuch((lv - 1) / 254)}</b>${yb ? `, most in ${2000 + yb}` : ""}`;
+              if (hattrs[o + 4]) s += `<br>History: ${HIST_WORD[hattrs[o + 4]]}`;
+            }
+            return s;
+          }
+
+          // ---- the year card ------------------------------------------------------------
+          let cardData = null;
+          // one bar per year you can scroll to, plus any other year the window
+          // dates; an imagery year the window cannot date is an empty slot
+          function viewCounts() {
+            const out = {}, dated = {};
+            const y0 = hmeta.y0 || st.y0, y1 = hmeta.y1 || st.y1;
+            const ys = [...new Set([...S2Y, ...Array.from({length: Math.max(0, y1 - y0)}, (_, i) => y0 + 1 + i)])].sort((a, b) => a - b);
+            for (const y of ys) { out[y] = 0; dated[y] = y > y0 && y <= y1; }
+            let total = 0;
+            if (hattrs) for (let i = 0; i < N; i++) {
+              const o = HB * i, lv = hattrs[o + 1];
+              if (lv && hattrs[o + 8]) total++;
+              if (MODEL_MODES.includes(st.gmode)) { const fy = hattrs[o + 14]; if (fy && hattrs[o + 15] && out[2000 + fy] != null) out[2000 + fy]++; }
+              else if (st.gmode === "kinds") { const yb = hattrs[o], kd = hattrs[o + 6]; if (yb && kd && !st.hideKinds.has(kd) && out[2000 + yb] != null) out[2000 + yb]++; }
+              else { const yb = hattrs[o]; if (yb && lv >= FAIR && hattrs[o + 8] && out[2000 + yb] != null) out[2000 + yb]++; }
+            }
+            return {years: out, dated, total};
+          }
+          // bars per year: one series, ink on a baseline; the imagery year in
+          // full ink with its count, the others lighter; a tooltip per bar
+          function yearBars(c) {
+            const ys = Object.keys(c.years).map(Number);
+            if (!ys.length) return "";
+            const W = 346, H = 78, base = 60, gap = 6, bw = Math.min(56, (W - gap * (ys.length - 1)) / ys.length);
+            const x0 = (W - (bw * ys.length + gap * (ys.length - 1))) / 2;
+            const max = Math.max(1, ...ys.map((y) => c.years[y]));
+            let s = `<svg width="${W}" height="${H}" role="img" aria-label="hexagons in view that changed a fair amount or more, by the year of their biggest change">`;
+            ys.forEach((y, i) => {
+              const v = c.years[y], h = v ? Math.max(3, (base - 14) * v / max) : 0, x = x0 + i * (bw + gap), cur = y === st.imgYear;
+              const r = Math.min(4, h / 2);
+              if (h) s += `<path d="M${x},${base} v${-(h - r)} q0,${-r} ${r},${-r} h${bw - 2 * r} q${r},0 ${r},${r} v${h - r} z" fill="${rgba(INK, cur ? 0.9 : 0.28)}"/>`;
+              const why = c.dated[y] ? `${fmt(v)} hexagon${v === 1 ? "" : "s"} changed most between the ${y - 1} and ${y} pictures` : `${y} is outside the years read: widen them to ${y - 1} to date changes into ${y}`;
+              s += `<rect x="${x - gap / 2}" y="0" width="${bw + gap}" height="${H}" fill="transparent" data-tip="${why}"/>`;
+              if (!c.dated[y]) s += `<line x1="${x}" x2="${x + bw}" y1="${base - 1}" y2="${base - 1}" stroke="rgba(230,233,236,.3)" stroke-dasharray="2 3"/>`;
+              if (cur && v) s += `<text class="lbl" x="${x + bw / 2}" y="${base - h - 4}" text-anchor="middle">${fmt(v)}</text>`;
+              s += `<text x="${x + bw / 2}" y="${H - 4}" text-anchor="middle"${cur ? ' class="lbl"' : ""}>${y}</text>`;
+            });
+            s += `<line x1="0" x2="${W}" y1="${base + 0.5}" y2="${base + 0.5}" stroke="rgba(230,233,236,.25)"/></svg>`;
+            return s;
+          }
+          // the clicked hexagon's steps, each as a multiple of that year's
+          // median step in view: the biggest in full ink, a dashed line at 1
+          function stepBars(rel, steps, years, big) {
+            if (!rel || !rel.length) return "";
+            const W = 346, H = 74, base = 56, gap = 6, n = rel.length, bw = Math.min(46, (W - gap * (n - 1)) / n);
+            const x0 = (W - (bw * n + gap * (n - 1))) / 2;
+            const vmax = Math.max(2, ...rel.filter((v) => v != null));
+            const yOf = (v) => base - (base - 10) * Math.min(1, v / vmax);
+            let s = `<svg width="${W}" height="${H}" role="img" aria-label="AlphaEarth year-to-year change for this hexagon">`;
+            rel.forEach((v, i) => {
+              const x = x0 + i * (bw + gap), y = years[i];
+              if (v != null) {
+                const top_ = yOf(v), h = base - top_, r = Math.min(4, h / 2);
+                if (h > 0.5) s += `<path d="M${x},${base} v${-(h - r)} q0,${-r} ${r},${-r} h${bw - 2 * r} q${r},0 ${r},${r} v${h - r} z" fill="${rgba(INK, y === big ? 0.9 : 0.28)}"/>`;
+              }
+              s += `<rect x="${x - gap / 2}" y="0" width="${bw + gap}" height="${H}" fill="transparent" data-tip="${y - 1} to ${y}: ${v == null ? "no data" : `${v.toFixed(1)} times the usual step here that year (${steps[i].toFixed(3)})`}"/>`;
+              s += `<text x="${x + bw / 2}" y="${H - 4}" text-anchor="middle"${y === big ? ' class="lbl"' : ""}>${n > 5 ? `’${String(y).slice(-2)}` : `’${String(y - 1).slice(-2)} to ’${String(y).slice(-2)}`}</text>`;
+            });
+            const ty = yOf(1); s += `<line x1="0" x2="${W}" y1="${ty}" y2="${ty}" stroke="rgba(230,233,236,.55)" stroke-dasharray="3 3"/><text x="${W}" y="${ty - 3}" text-anchor="end">usual step here</text>`;
+            s += `<line x1="0" x2="${W}" y1="${base + 0.5}" y2="${base + 0.5}" stroke="rgba(230,233,236,.25)"/></svg>`;
+            return s;
+          }
+          function hexSection(c) {
+            if (!c || !c.kind) return "";
+            let h = `<div class="hex"><button class="x" title="close (Esc)" aria-label="close">×</button>`;
+            if (c.place && c.place.length) h += `<div class="place">${c.place.map((q) => typeof q === "string" ? esc(q) : esc(q.name) + (q.tag ? ` <span>(${esc(q.tag)})</span>` : "")).join(", ")}</div>`;
+            if (c.kind === "note") return h + `<h3>${esc(c.title || "")}</h3></div>`;
+            h += `<h3>This hexagon</h3>`;
+            // its H3 string and center, each copyable, however it was picked
+            if (c.cell) {
+              let ll = null; try { ll = cellToLatLng(c.cell); } catch (e) {}
+              const lat_lon = ll ? `${ll[0].toFixed(6)}, ${ll[1].toFixed(6)}` : "";
+              h += `<div class="coords"><code title="H3 string">${esc(c.cell)}</code><button data-copy="${esc(c.cell)}">copy</button>`;
+              if (lat_lon) h += `<code title="lat, long of the cell's center">${lat_lon}</code><button data-copy="${lat_lon}">copy</button>`;
+              h += `</div>`;
+            }
+            // ONE VOICE PER LAYER: the card speaks for the layer the map is colored by, nothing else
+            const mode = st.gmode, o = c.otf && c.otf.years && c.otf.years.length ? c.otf : null;
+            const last = o ? o.years[o.years.length - 1] : null;
+            const y0c = hmeta.y0 || st.y0;
+            const noModel = `<p>The model has not run here yet: it runs from zoom ${hmeta.otf_zoom || 13}.</p>`;
+            const builtOf = (r) => r.shares[4] + r.shares[5] + r.shares[6];
+            if (mode === "allbuilt") {
+              if (!o) h += noModel;
+              else {
+                const names = c.otf_classes || [];
+                h += `<h4>All built, ${last.year}</h4><div class="at-lc">`;
+                last.shares.map((v, k) => [names[k], v]).filter(([, v]) => v >= 0.01).sort((a, b) => b[1] - a[1]).slice(0, 5)
+                  .forEach(([nm, v]) => { h += `<span>${esc(cap(showClass(nm)))}</span><span><i style="width:${Math.max(2, 120 * v)}px"></i></span><span>${Math.round(100 * v)}%</span>`; });
+                h += `</div>`;
+                if (o.years.length > 1) h += `<p class="sub">Built (other built-up, road or building) by year: ${o.years.map((r) => `${r.year} ${Math.round(100 * builtOf(r))}%`).join(", ")}.</p>`;
+              }
+            } else if (mode === "struct") {
+              if (!o) h += noModel;
+              else {
+                h += `<h4>Structure reading, ${last.year}</h4>`;
+                h += last.structure != null ? `<p>On average a <b>${last.structure}%</b> chance that a structure stands on or touches each 10 m of it.</p>` : `<p>No AlphaEarth here.</p>`;
+                const ys = o.years.filter((r) => r.structure != null);
+                if (ys.length > 1) h += `<p class="sub">By year: ${ys.map((r) => `${r.year} ${Math.round(r.structure)}%`).join(", ")}.</p>`;
+              }
+            } else if (mode === "first") {
+              if (!o) h += noModel;
+              else {
+                const fr = o.years.find((r) => builtOf(r) >= 0.5);
+                h += `<h4>First year built</h4>`;
+                h += fr ? `<p>Half of it or more first reads built in <b>${fr.year}${fr.year === y0c ? " or before" : ""}</b>.</p>` : `<p>Not read built in any year from ${o.years[0].year} to ${last.year}.</p>`;
+                if (o.years.length > 1) h += `<p class="sub">Built by year: ${o.years.map((r) => `${r.year} ${Math.round(100 * builtOf(r))}%`).join(", ")}.</p>`;
+                if (last.structure != null && last.structure < 50) h += `<p class="sub">Not drawn: the map shows only where a structure stands (the structure reading at 50% or more), and it reads ${Math.round(last.structure)}% here.</p>`;
+              }
+            } else if (c.level == null) h += `<p>No AlphaEarth data here.</p>`;
+            else {
+              h += `<h4>AEF Change</h4>`;
+              h += `<p>The ground changed <b>${howMuch(c.level)}</b> from ${c.y0} to ${c.y1}, compared with the rest of the view. Its year-to-year change stood out most between the <b>${c.big - 1} and ${c.big}</b> pictures${c.stand != null ? `, ${c.stand.toFixed(1)} times the usual step in view that year` : ""}.</p>`;
+              if (c.hist && c.ccode) h += `<p class="sub">${histText(c.ccode, c.big, c.hist, c.cratio)}${c.hbig > 0 && (c.hbig <= c.y0 || c.hbig > c.y1) ? ` Its biggest step from ${c.hist[0]} to ${c.hist[1]} was into ${c.hbig}, outside the years read.` : ""}</p>`;
+              h += stepBars(c.rel, c.steps, c.step_years, c.big);
+              if (S2Y.includes(c.big) && S2Y.includes(c.big - 1)) h += `<p class="sub">Hold space with the pointer near it and scroll between ${c.big - 1} and ${c.big} to see what happened.</p>`;
+              else if (c.big) h += `<p class="sub">The imagery starts in ${S2Y[0]}, so there is no picture from before ${c.big} to compare.</p>`;
+            }
+            if (c.km2) h += `<p class="sub">${c.km2 < 0.1 ? `${Math.round(c.km2 * 1e6).toLocaleString("en-US")} m²` : `${c.km2.toFixed(2)} km²`} hexagon.</p>`;
+            return h + `</div>`;
+          }
+          let ycFolded = keep("card"), ycOpenedFor = null;
+          function renderYear() {
+            yc.classList.toggle("holding", st.holding);
+            const c = viewCounts();
+            // the imagery year only while the imagery shows; otherwise the hint
+            const cbH = `<button class="at-cb" title="${ycFolded ? "show the card" : "fold the card"}">${ICON.chev}</button>`;
+            let h = st.holding
+              ? `<div class="yr"><b>${st.imgYear}</b><span><span class="comp">${COMP_NAME[st.s2comp] || ""}</span><span class="comps">${COMPS.map(([k, l, t]) => `<button data-comp="${k}" class="${k === st.s2comp ? "on" : ""}" title="${esc(t)}">${l}</button>`).join("")}</span>Scroll or <kbd>[</kbd> <kbd>]</kbd> for another year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> for colors, <kbd>F</kbd> for full screen. Let go to see the hexagons.</span>${cbH}</div>`
+              : st.pair
+              ? `<div class="yr quiet"><span><kbd>O</kbd> cycles the right map (AEF Change, Overture, WSF), <kbd>P</kbd> back to one map</span>${cbH}</div>`
+              : `<div class="yr quiet"><span>Hold space for the Sentinel-2 imagery; <kbd>P</kbd> pairs it with the map</span>${cbH}</div>`;
+            // the view's chart by year belongs to the layers that date things (one voice per layer)
+            if (N && hattrs && (st.gmode === "first" || st.gmode === "much")) {
+              h += MODEL_MODES.includes(st.gmode)
+                ? `<h4>First year built, by year</h4><p class="sub">Hexagons the model has read, by the first year read in which half of each reads built (the first bar: that year or before)</p>`
+                : st.gmode === "kinds"
+                ? `<h4>Kinds of change, by year</h4><p class="sub">Hexagons in the kinds shown, by the year their change stood out most</p>`
+                : `<h4>Where it changed, by year</h4><p class="sub">Hexagons in view that changed a fair amount or more, by the year their change stood out most</p>`;
+              h += yearBars(c);
+            } else if (!(N && hattrs)) h += `<p class="sub" style="margin-top:12px">${map && map.getZoom() < HEXZ ? `Zoom in to ${HEXZ} for the hexagons.` : "Loading this view…"}</p>`;
+            yc.innerHTML = h;
+            renderFc();
+            yc.classList.toggle("collapsed", ycFolded);
+            const cb = yc.querySelector(".yr .at-cb");
+            if (cb) cb.onclick = (e) => { e.stopPropagation(); ycFolded = !ycFolded; keep("card", ycFolded); renderYear(); };
+            fitCard();
+          }
+          // the card never scrolls: when its content is taller
+          // than the pane below it, it is scaled down from its top right
+          // corner to fit. On a narrow screen it keeps its own scroll.
+          function fitCard() {
+            yc.style.transform = "";
+            if (window.matchMedia("(max-width:760px)").matches) return;
+            const avail = pane.clientHeight - yc.offsetTop - 12, need = yc.offsetHeight;
+            if (avail > 0 && need > avail) yc.style.transform = `scale(${avail / need})`;
+          }
+          // THE HEXAGON'S CARD, FLOATING: compact (the place and the layer's headline) next to where the
+          // hexagon was clicked, More for the whole account, Esc or x to close. A card that arrives with no
+          // click just before it (a search) sits at the top right
+          let fcMore = false, fcFor = null, fcClick = null;
+          pane.addEventListener("pointerdown", (e) => { fcClick = {x: e.clientX, y: e.clientY, t: Date.now()}; }, true);
+          function renderFc() {
+            const c = cardData;
+            if (!c || !c.kind) { fc.style.display = "none"; fcFor = null; return; }
+            const fresh = c.n !== fcFor;
+            if (fresh) fcMore = false;
+            fc.innerHTML = hexSection(c) + `<div class="fcbar">${c.kind === "note" ? "" : `<button class="fcmore">${fcMore ? "Less" : "More"}</button>`}<span><kbd>Esc</kbd> closes</span></div>`;
+            fc.classList.toggle("more", fcMore);
+            fc.style.display = "block";
+            const x = fc.querySelector(".x");
+            if (x) x.onclick = (e) => { e.stopPropagation(); closeCard(); };
+            const m = fc.querySelector(".fcmore");
+            if (m) m.onclick = (e) => { e.stopPropagation(); fcMore = !fcMore; renderFc(); };
+            if (fresh) { fcFor = c.n; placeFc(); } else keepFcIn();
+          }
+          function placeFc() {
+            const r = pane.getBoundingClientRect(), w = fc.offsetWidth, h = fc.offsetHeight;
+            let x, y;
+            if (fcClick && Date.now() - fcClick.t < 15000) {
+              x = fcClick.x - r.left + 16; y = fcClick.y - r.top + 16;
+              if (x + w > r.width - 12) x = fcClick.x - r.left - w - 16;
+              if (y + h > r.height - 12) y = r.height - h - 12;
+            } else { x = r.width - w - 12; y = 60; }
+            fc.style.left = Math.max(12, x) + "px"; fc.style.top = Math.max(12, y) + "px";
+          }
+          // More makes it taller: kept inside the pane
+          function keepFcIn() {
+            const r = pane.getBoundingClientRect(), h = fc.offsetHeight, w = fc.offsetWidth;
+            const top = parseFloat(fc.style.top) || 12, left = parseFloat(fc.style.left) || 12;
+            if (top + h > r.height - 12) fc.style.top = Math.max(12, r.height - h - 12) + "px";
+            if (left + w > r.width - 12) fc.style.left = Math.max(12, r.width - w - 12) + "px";
+          }
+          for (const el of [yc, fc]) el.addEventListener("pointermove", (e) => {
+            const t = e.target && e.target.getAttribute && e.target.getAttribute("data-tip");
+            if (!t) { tip.style.display = "none"; return; }
+            const p = pane.getBoundingClientRect();
+            tip.textContent = t;
+            tip.style.display = "block";
+            tip.style.left = Math.max(8, e.clientX - p.left - tip.offsetWidth - 14) + "px";
+            tip.style.top = (e.clientY - p.top + 12) + "px";
+          });
+          for (const el of [yc, fc]) el.addEventListener("pointerleave", () => { tip.style.display = "none"; });
+          // the imagery colors, from the hold card's own buttons
+          yc.addEventListener("click", (e) => {
+            const b = e.target && e.target.closest && e.target.closest("[data-comp]");
+            if (!b) return;
+            e.stopPropagation();
+            setComp(b.getAttribute("data-comp"));
+          });
+          for (const el of [yc, fc]) el.addEventListener("click", (e) => {
+            const b = e.target && e.target.closest && e.target.closest("[data-copy]");
+            if (!b) return;
+            e.stopPropagation();
+            const t = b.getAttribute("data-copy");
+            const done = () => { b.textContent = "copied"; setTimeout(() => { b.textContent = "copy"; }, 1200); };
+            // the notebook may sit in an iframe without clipboard permission (molab): fall back to a selection copy
+            const fallback = () => { const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0"; root.appendChild(ta); ta.select(); try { document.execCommand("copy"); done(); } catch (e2) {} ta.remove(); };
+            if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, fallback); else fallback();
+          });
+          function renderCard() {
+            try { cardData = JSON.parse(model.get("card") || "null"); } catch (e) { cardData = null; }
+            picked = cardData && cardData.cell ? cardData.cell : null;
+            // a new click opens a folded card once; folding it again stays folded
+            if (cardData && cardData.n != null && cardData.n !== ycOpenedFor) { ycOpenedFor = cardData.n; if (ycFolded) { ycFolded = false; keep("card", false); } }
+            renderYear(); update();
+          }
+          function closeCard() { model.set("pick", JSON.stringify({close: true, n: ++seq})); model.save_changes(); cardData = null; picked = null; imgPick = null; renderYear(); update(); }
+          // a pick: the same cell again clears it
+          function pickCell(cell, ll, pt, onImagery) {
+            // a searched cell goes with the next click, inside it or anywhere
+            // else, and the map stays where it is; a click inside
+            // it only clears it
+            if (searched) {
+              let inside = false; try { inside = latLngToCell(ll.lat, ll.lng, getResolution(searched)) === searched; } catch (e) {}
+              searched = null; update();
+              if (inside) return;
+            }
+            if (cell && cell === picked) { closeCard(); return; }
+            imgPick = onImagery ? cell : null;
+            model.set("pick", JSON.stringify({cell, lon: ll.lng, lat: ll.lat, admin: adminAt(pt), n: ++seq}));
+            model.save_changes();
+          }
+
+          // ---- the layers --------------------------------------------------------------
+          let map = null, ov = null, map2 = null, ov2 = null;
+          const slot = (m = map) => { const want = cfg.labels_slot || "watername_ocean"; const s = m && m.getStyle && m.getStyle(); if (!s || !s.layers || s.layers.some((x) => x.id === want)) return want; const l = s.layers.find((x) => x.type === "symbol"); return (l && l.id) || want; };
+          // ---- Sentinel-2 true color, read and drawn here by deck.gl-raster (Development Seed's
+          // MosaicLayer + COGLayer, as iceye-view.py and segments-map's ICEYE): the kernel only names
+          // the footprints under the view (its STAC search, s2i); the browser opens each one's TCI COG
+          // on data.source.coop and decodes its tiles in workers, so no tile waits on the kernel. The
+          // year shown loads first, the other years once it is in (a scroll while holding is then
+          // instant). Yearly footprints paint over the fill ones. False colors stay on the kernel
+          const S2GPU = cfg.s2_gpu !== false;
+          const S2_WORKER = "https://esm.sh/@developmentseed/geotiff@0.8.0/es2022/dist/pool/worker.mjs";
+          let s2Pool = null, s2Warm = false;
+          const s2Tiffs = new Map();  // url -> Promise<GeoTIFF>: the headers, kept for the session
+          // year -> {ids, batches}: a batch is one answer of the kernel (a tile's footprints, each
+          // footprint in the first batch that named it) and gets its own MosaicLayer: a MosaicLayer
+          // looks for its sources only when the camera moves, so footprints added to one after the
+          // camera stopped would wait for the next pan; a new layer looks at once
+          const s2Src = new Map();
+          // the requests to data.source.coop, 16 at a time (HTTP/2: one connection; the default is 6),
+          // the rest queued in order: the year shown first, yearly footprints before the fill ones,
+          // then the nearest the center of the view
+          const s2Limiter = new PerOriginSemaphore({maxRequests: 16});
+          const s2Asked = new Set();  // "year/z/x/y" asked of the kernel
+          const s2Stat = {tiles: 0, pending: 0, failed: 0, last: 0, years: {}};  // years: per year ("2025", "2025 fill") {tiles, pending, last}, for the tests
+          const s2Tiff = (url, opts, year, fill) => {
+            let p = s2Tiffs.get(url);
+            if (!p) {
+              const near = opts && opts.getPriority;
+              const getPriority = () => [year === st.imgYear ? 0 : 1, fill ? 1 : 0, near ? near() : 0];
+              p = GeoTIFF.fromUrl(url, {concurrencyLimiter: s2Limiter, getPriority});
+              s2Tiffs.set(url, p);
+            }
+            return p;
+          };
+          // the view and half of it again on every side: where footprints are looked for and mounted
+          function s2View() {
+            const bs = [map, st.pair ? map2 : null].filter(Boolean).map((m) => m.getBounds());
+            const W_ = Math.min(...bs.map((b) => b.getWest())), E_ = Math.max(...bs.map((b) => b.getEast()));
+            const S_ = Math.min(...bs.map((b) => b.getSouth())), N_ = Math.max(...bs.map((b) => b.getNorth()));
+            const dx = (E_ - W_) / 2, dy = (N_ - S_) / 2;
+            return [W_ - dx, Math.max(-85, S_ - dy), E_ + dx, Math.min(85, N_ + dy)];
+          }
+          function s2Discover() {
+            if (!map || !S2GPU || st.s2comp !== "tci" || !(st.holding || st.pair || map.getZoom() >= 9)) return;
+            const z = Math.max(cfg.s2_min_z || 7, Math.min(9, Math.floor(map.getZoom()))), n = 2 ** z;
+            const tx = (lon) => Math.min(n - 1, Math.max(0, Math.floor((lon + 180) / 360 * n)));
+            const ty = (lat) => { const v = Math.sin(lat * Math.PI / 180); return Math.min(n - 1, Math.max(0, Math.floor((0.5 - Math.log((1 + v) / (1 - v)) / (4 * Math.PI)) * n))); };
+            const [W_, S_, E_, N_] = s2View(), x0 = tx(W_), x1 = tx(E_), y0 = ty(N_), y1 = ty(S_);
+            if ((x1 - x0 + 1) * (y1 - y0 + 1) > 64) return;
+            for (const year of [st.imgYear, ...S2Y.filter((y) => y !== st.imgYear)])
+              for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
+                const k = `${year}/${z}/${x}/${y}`;
+                if (s2Asked.has(k)) continue;
+                s2Asked.add(k);
+                ask("s2i", year, {z, x, y}).then((u8) => {
+                  const items = u8 ? JSON.parse(new TextDecoder().decode(u8)) : [];
+                  let e = s2Src.get(year);
+                  if (!e) { e = {ids: new Set(), batches: []}; s2Src.set(year, e); }
+                  const bt = {key: k.replace(/\//g, "-"), yearly: [], fill: [], bbox: [180, 90, -180, -90]};
+                  for (const it of items) {
+                    if (!it.bbox || e.ids.has(it.id)) continue;
+                    e.ids.add(it.id);
+                    bt[it.fill ? "fill" : "yearly"].push({id: it.id, url: it.url, bbox: it.bbox});
+                    bt.bbox = [Math.min(bt.bbox[0], it.bbox[0]), Math.min(bt.bbox[1], it.bbox[1]), Math.max(bt.bbox[2], it.bbox[2]), Math.max(bt.bbox[3], it.bbox[3])];
+                  }
+                  if (bt.yearly.length || bt.fill.length) { e.batches.push(bt); update(); }
+                }, () => { s2Asked.delete(k); });
+              }
+          }
+          async function s2TileData(image, {device, x, y, signal, pool}, key) {
+            const sy = s2Stat.years[key] || (s2Stat.years[key] = {tiles: 0, pending: 0, last: 0});
+            s2Stat.pending++; sy.pending++;
+            try {
+              const {array} = await image.fetchTile(x, y, {boundless: false, pool, signal});
+              const {width, height, data} = array, px = width * height;
+              let rgba = data;
+              if (data.length === 3 * px) {
+                rgba = new Uint8Array(4 * px);
+                for (let i = 0; i < px; i++) { rgba[4 * i] = data[3 * i]; rgba[4 * i + 1] = data[3 * i + 1]; rgba[4 * i + 2] = data[3 * i + 2]; rgba[4 * i + 3] = 255; }
+              }
+              s2Stat.tiles++; sy.tiles++;
+              return {texture: device.createTexture({data: rgba, format: "rgba8unorm", width, height, sampler: {magFilter: "linear", minFilter: "linear"}}), width, height};
+            } catch (e) {
+              if (!(signal && signal.aborted)) s2Stat.failed++;
+              throw e;
+            } finally {
+              s2Stat.pending--; sy.pending--;
+              s2Stat.last = sy.last = Date.now();
+              // the year shown is in: mount the others
+              if (!s2Warm && s2Stat.pending === 0) { s2Warm = true; setTimeout(update, 250); }
+            }
+          }
+          // TCI's black is nodata; the strip's gamma, v -> v ** (1 / gamma), as the kernel's tiles had
+          const S2Look = {
+            name: "s2Look",
+            fs: `uniform s2LookUniforms {
+  float gamma;
+} s2Look;
+`,
+            inject: {"fs:DECKGL_FILTER_COLOR": `
+  if (color.r + color.g + color.b < 0.01) discard;
+  color = vec4(pow(color.rgb, vec3(1.0 / s2Look.gamma)), 1.0);
+`},
+            uniformTypes: {gamma: "f32"},
+            getUniforms: (q) => ({gamma: q.gamma}),
+          };
+          const s2CogLayers = (year, left = false) => {
+            if (!s2Pool) s2Pool = new DecoderPool({size: Math.min(6, navigator.hardwareConcurrency || 4),
+              createWorker: () => new Worker(URL.createObjectURL(new Blob([`import "${S2_WORKER}";`], {type: "text/javascript"})), {type: "module"})});
+            const e = s2Src.get(year);
+            if (!e || !map) return [];
+            // shown or hidden by visible, not opacity: the tile layers inside MosaicLayer and COGLayer
+            // keep each tile's raster layer as it was when the tile came in (an opacity change never
+            // reaches them, so a tile loaded while holding stayed after the hold), while deck.gl checks
+            // every parent's visible on each draw. Hidden years still load their tiles
+            const visible = (left ? st.pair && st.left === "s2" : st.holding) && year === st.imgYear;
+            const gamma = Number(st.s2scale) || 1, pre = (left ? "s2gl-" : "s2g-");
+            const [W_, S_, E_, N_] = s2View();
+            const live = e.batches.filter((bt) => bt.bbox[0] < E_ && bt.bbox[2] > W_ && bt.bbox[1] < N_ && bt.bbox[3] > S_);
+            // every batch's fill under every batch's yearly footprints
+            const parts = [...live.filter((bt) => bt.fill.length).map((bt) => [bt, "fill"]), ...live.filter((bt) => bt.yearly.length).map((bt) => [bt, "yearly"])];
+            return parts.map(([bt, part]) => new MosaicLayer({
+              id: pre + bt.key + "-" + part, sources: bt[part], maxCacheSize: 0, minZoom: cfg.s2_min_z || 7, visible, beforeId: slot(left ? map2 : map),
+              getSource: (src, o) => s2Tiff(src.url, o, year, part === "fill"),
+              onSourceError: () => {},  // a footprint the STAC lists but the bucket lacks: nothing there
+              renderSource: (src, {data, signal}) => new COGLayer({
+                id: pre + year + "-" + src.id, geotiff: data, getTileData: (img, o) => s2TileData(img, o, year + (part === "fill" ? " fill" : "")), pool: s2Pool, signal,
+                refinementStrategy: "best-available", maxRequests: 16,
+                renderTile: (d) => ({renderPipeline: [{module: CreateTexture, props: {textureName: d.texture}}, {module: S2Look, props: {gamma}}]}),
+                updateTriggers: {renderTile: [gamma]},
+              }),
+            }));
+          };
+          // the years mounted: the one shown, the rest once it has loaded
+          const s2Years = () => (s2Warm ? [st.imgYear, ...S2Y.filter((y) => y !== st.imgYear)] : [st.imgYear]);
+          // every imagery year stays mounted once the view is close enough, the
+          // ones not shown at opacity 0, so their tiles load ahead and a scroll
+          // while holding is instant
+          const s2Layer = (year, left = false) => new TileLayer({
+            id: (left ? "s2l-" : "s2-") + year + "-g" + (cfg.s2_gen || 0),
+            getTileData: async ({index, signal}) => { const u8 = await ask("s2", year, index, signal); return u8 ? pngBitmap(u8) : null; },
+            onTileError: (e) => { if (!e || e.name !== "AbortError") say("s2 tile: " + ((e && e.message) || e)); },
+            tileSize: cfg.tile || 256, minZoom: cfg.s2_min_z || 7, maxZoom: 14, refinementStrategy: "best-available", debounceTime: 120, beforeId: slot(left ? map2 : map),
+            opacity: (left ? st.pair && st.left === "s2" : st.holding) && year === st.imgYear ? 1 : 0,
+            renderSubLayers: (p) => { if (!p.data) return null; const {west, south, east, north} = p.tile.bbox; return new BitmapLayer(p, {data: null, image: p.data, bounds: [west, south, east, north]}); },
+          });
+          // the hexagons: tiles of cell numbers from the kernel (1 + the row in
+          // this frame, 0 none), colored here from hcol, so a mode or window
+          // change repaints without a round trip. A tile from an older frame
+          // keeps its last picture until the new frame's tile replaces it.
+          const unz = async (u8) => new Uint32Array(await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
+          // hexagon edges drawn from the H3 boundary, not the tile's pixels
+          //. The tile says which hexagons are near a pixel (its
+          // 3x3 texels, as local indices); each one's ring (h3-js
+          // cellToBoundary, in tile pixel units) gives the fragment's signed
+          // distance to that hexagon, and the hexagon covers the fragment by
+          // that distance over one screen pixel. Smooth at any zoom; an edge
+          // against no hexagon fades to clear.
+          const GEO_W = 64, COL_W = 256;  // hexagons per row of the ring and color textures
+          class HexEdgeLayer extends BitmapLayer {
+            getShaders() {
+              const s = super.getShaders();
+              s.fs = s.fs.replace("uniform sampler2D bitmapTexture;", "uniform sampler2D bitmapTexture;\nuniform highp sampler2D hexGeom;\nuniform sampler2D hexCol;");
+              s.fs = s.fs.replace("vec4 bitmapColor = texture(bitmapTexture, uv);", `
+                ivec2 tsz = textureSize(bitmapTexture, 0);
+                vec2 tp = uv * vec2(tsz);
+                ivec2 tc = clamp(ivec2(floor(tp)), ivec2(0), tsz - 1);
+                float pw = max(0.7071 * length(fwidth(tp)), 1e-5);
+                int seen[9]; int ns = 0;
+                vec4 acc = vec4(0.0);
+                float cs = 0.0;  // coverage summed: near a corner the edge distances overlap past one pixel
+                for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                  vec4 t = texelFetch(bitmapTexture, clamp(tc + ivec2(dx, dy), ivec2(0), tsz - 1), 0);
+                  int k = int(t.r * 255.0 + 0.5) + 256 * int(t.g * 255.0 + 0.5) - 1;
+                  if (k < 0) continue;
+                  bool dup = false;
+                  for (int j = 0; j < 9; j++) { if (j >= ns) break; if (seen[j] == k) dup = true; }
+                  if (dup) continue;
+                  seen[ns] = k; ns++;
+                  vec2 v[10];
+                  for (int j = 0; j < 5; j++) { vec4 g = texelFetch(hexGeom, ivec2(5 * (k % ${GEO_W}) + j, k / ${GEO_W}), 0); v[2 * j] = g.xy; v[2 * j + 1] = g.zw; }
+                  vec2 ctr = vec2(0.0);
+                  for (int j = 0; j < 10; j++) ctr += v[j];
+                  ctr /= 10.0;
+                  float sd = 1e9;
+                  for (int j = 0; j < 10; j++) {
+                    vec2 a = v[j], e = v[(j + 1) % 10] - a;
+                    float L = length(e);
+                    if (L < 1e-6) continue;
+                    vec2 nr = vec2(-e.y, e.x) / L;
+                    if (dot(ctr - a, nr) < 0.0) nr = -nr;
+                    sd = min(sd, dot(tp - a, nr));
+                  }
+                  vec4 c = texelFetch(hexCol, ivec2(k % ${COL_W}, k / ${COL_W}), 0);
+                  float cov = clamp(sd / pw + 0.5, 0.0, 1.0);
+                  acc += vec4(c.rgb * c.a, c.a) * cov; cs += cov;
+                }
+                // within a tile pixel of the tile's edge, what no hexagon covers (a sliver of a hexagon
+                // listed only in the next tile: none of this tile's pixel centers falls in it) takes the
+                // hexagon of the tile pixel under it, unfaded, so tile edges leave no dotted seam
+                vec2 bd = min(tp, vec2(tsz) - tp);
+                if (min(bd.x, bd.y) < 1.0 && cs < 1.0) {
+                  vec4 t0 = texelFetch(bitmapTexture, tc, 0);
+                  int k0 = int(t0.r * 255.0 + 0.5) + 256 * int(t0.g * 255.0 + 0.5) - 1;
+                  if (k0 >= 0) { vec4 c0 = texelFetch(hexCol, ivec2(k0 % ${COL_W}, k0 / ${COL_W}), 0); acc += vec4(c0.rgb * c0.a, c0.a) * (1.0 - cs); cs = 1.0; }
+                }
+                if (cs > 1.0) acc /= cs;
+                vec4 bitmapColor = acc.a > 1e-4 ? vec4(acc.rgb / acc.a, min(acc.a, 1.0)) : vec4(0.0);`);
+              return s;
+            }
+            updateState(params) {
+              super.updateState(params);
+              const {props, oldProps} = params, dev = this.context.device;
+              const mk = (format, width, height, data) => dev.createTexture({format, width, height, data, mipmaps: false, sampler: {minFilter: "nearest", magFilter: "nearest", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge"}});
+              const st_ = this.state;
+              if (props.pic !== oldProps.pic && props.pic) {
+                st_.idTex && st_.idTex.destroy(); st_.geoTex && st_.geoTex.destroy();
+                const q = props.pic;
+                st_.idTex = mk("rg8unorm", q.n, q.n, q.idx);
+                st_.geoTex = mk("rgba32float", 5 * GEO_W, q.gh, q.geo);
+              }
+              if (props.col !== oldProps.col && props.col) {
+                st_.colTex && st_.colTex.destroy();
+                st_.colTex = mk("rgba8unorm", COL_W, props.col.length / (4 * COL_W), props.col);
+              }
+            }
+            finalizeState(ctx) {
+              super.finalizeState(ctx);
+              for (const k of ["idTex", "geoTex", "colTex"]) if (this.state[k]) this.state[k].destroy();
+            }
+            draw(opts) {
+              const {model, coordinateConversion, bounds, idTex, geoTex, colTex} = this.state;
+              if (!model || !idTex || !geoTex || !colTex || opts.shaderModuleProps.picking.isActive) return;
+              model.setBindings({hexGeom: geoTex, hexCol: colTex});
+              model.shaderInputs.setProps({bitmap: {bitmapTexture: idTex, bounds, coordinateConversion, desaturate: 0, tintColor: [1, 1, 1], transparentColor: [0, 0, 0, 0]}});
+              model.draw(this.context.renderPass);
+            }
+          }
+          HexEdgeLayer.layerName = "HexEdgeLayer";
+          const ptimes = [];  // per hexagon tile painted, for the tests
+          // once per tile and frame: the tile's hexagons as local indices (1 +,
+          // 0 none) and their rings in tile pixels; the colors per repaint
+          function tilePic(d) {
+            if (d.seq !== hmeta.seq || !hcol32) return d.col ? d : null;  // an older frame's tile keeps its last picture
+            if (d.col && d.cseq === hexSeq) return d;
+            const tp = performance.now();
+            if (!d.pic) {
+              const n = d.side, ids = d.ids, loc = new Map(), rows = [], idx = new Uint8Array(2 * n * n);
+              let last = 0, lastL = 0;
+              for (let i = 0; i < ids.length; i++) {
+                const k = ids[i];
+                if (!k) continue;
+                if (k !== last) { const l = loc.get(k); if (l === undefined) { lastL = rows.length; loc.set(k, lastL); rows.push(k - 1); } else lastL = l; last = k; }
+                const v = Math.min(lastL + 1, 65535);
+                idx[2 * i] = v & 255; idx[2 * i + 1] = v >> 8;
+              }
+              const K = rows.length, gh = Math.max(1, Math.ceil(K / GEO_W)), geo = new Float32Array(5 * GEO_W * gh * 4);
+              const Z = 2 ** d.z, lonC = (d.x + 0.5) / Z * 360 - 180;
+              for (let j = 0; j < K; j++) {
+                const r = ring(hexes[rows[j]]);
+                if (!r) continue;
+                const m = Math.min(10, r.length - 1), o = (Math.floor(j / GEO_W) * 5 * GEO_W + 5 * (j % GEO_W)) * 4;
+                for (let q = 0; q < 10; q++) {
+                  let [lng, lat] = r[Math.min(q, m - 1)];
+                  if (lng - lonC > 180) lng -= 360; else if (lng - lonC < -180) lng += 360;
+                  const sn = Math.sin(lat * Math.PI / 180);
+                  geo[o + 2 * q] = ((lng + 180) / 360 * Z - d.x) * n;
+                  geo[o + 2 * q + 1] = ((0.5 - Math.log((1 + sn) / (1 - sn)) / (4 * Math.PI)) * Z - d.y) * n;
+                }
+              }
+              d.pic = {n, idx, geo, gh, rows};
+            }
+            const rows = d.pic.rows, col = new Uint8Array(COL_W * Math.max(1, Math.ceil(rows.length / COL_W)) * 4), c32 = new Uint32Array(col.buffer);
+            for (let j = 0; j < rows.length; j++) c32[j] = hcol32[rows[j]];
+            d.col = col; d.cseq = hexSeq;
+            ptimes.push({t: Date.now(), ms: performance.now() - tp, unz: d.unz, ready: d.done}); if (ptimes.length > 4000) ptimes.splice(0, 1000);
+            return d;
+          }
+          // one layer per frame. A new frame loads hidden behind the one on screen and replaces it
+          // whole once every tile in view is in (or after HEX_SWAP_MS), so two frames' hexagons
+          // (often two resolutions) never show side by side; tile by tile, each old tile stayed until
+          // its new one came in. "no-overlap": within a frame, a zoom's coarser tiles never show
+          // through finer ones
+          const HEX_SWAP_MS = 8000;
+          let shownSeq = 0, swapT = null, swapFor = 0;
+          const showFrame = (seq) => { if (seq !== hmeta.seq || seq === shownSeq) return; clearTimeout(swapT); swapT = null; swapFor = 0; shownSeq = seq; update(); };
+          const hexLayer = (visible, seq, onViewportLoad) => new TileLayer({
+            id: "hexes-" + seq, visible, onViewportLoad,
+            getTileData: async ({index, signal}) => {
+              const u8 = await ask("hex", seq, index, signal);
+              if (!u8) return null;
+              const t0 = performance.now(), ids = await unz(u8);
+              return {ids, seq, side: Math.round(Math.sqrt(ids.length)), z: index.z, x: index.x, y: index.y, unz: performance.now() - t0, done: Date.now()};
+            },
+            onTileError: (e) => { if (!e || (e.name !== "AbortError" && !/stale/.test(e.message || ""))) say("hexagon tile: " + ((e && e.message) || e)); },
+            tileSize: 256, minZoom: Math.floor(HEXZ), maxZoom: 17, refinementStrategy: "no-overlap", debounceTime: 60, beforeId: slot(),
+            updateTriggers: {renderSubLayers: [seq === hmeta.seq ? hexSeq : -1]},
+            renderSubLayers: (p) => {
+              const t = p.data ? tilePic(p.data) : null;
+              if (!t) return null;
+              const {west, south, east, north} = p.tile.bbox;
+              return new HexEdgeLayer(p, {data: null, image: null, pic: t.pic, col: t.col, bounds: [west, south, east, north]});
+            },
+          });
+          // ---- WSF: the context at every zoom (the atlas notebook's growth layer): each tile
+          // carries the half-year index in red, so "built by year Y" is colored here for any Y
+          const rawTiles = new Map();
+          async function rawTile({index, signal}) {
+            const u8 = await ask("wsfidx", 0, index, signal);
+            if (!u8) return null;
+            const bm = await createImageBitmap(new Blob([u8], {type: "image/png"}), {premultiplyAlpha: "none", colorSpaceConversion: "none"});
+            const c = new OffscreenCanvas(bm.width, bm.height);
+            const g = c.getContext("2d", {willReadFrequently: true});
+            g.drawImage(bm, 0, 0);
+            const d = g.getImageData(0, 0, bm.width, bm.height).data;
+            const k = new Uint8Array(bm.width * bm.height);
+            for (let i = 0, j = 0; i < k.length; i++, j += 4) k[i] = d[j + 3] ? d[j] : 0;
+            const t = {k, w: bm.width, h: bm.height, painted: null, key: null};
+            rawTiles.set(`${index.z}/${index.x}/${index.y}`, t);
+            if (rawTiles.size > 600) rawTiles.delete(rawTiles.keys().next().value);
+            return t;
+          }
+          // the year ramp: built before mid 2016 faint gray, later years by the ramp up to Y, none after
+          function growthLUT(Y) {
+            const lut = new Uint8ClampedArray(256 * 4);
+            for (let k = 1; k <= 20; k++) {
+              const yr = wsfYear(k), o = 4 * k;
+              let c = null, a = 0;
+              if (k === 1) { c = [150, 158, 166]; a = 150; }
+              else if (yr <= Y) { c = wsfCol(yr); a = 200; }
+              if (c) { lut[o] = c[0]; lut[o + 1] = c[1]; lut[o + 2] = c[2]; lut[o + 3] = a; }
+            }
+            return lut;
+          }
+          function paintRaw(t, Y) {
+            if (t.key === Y && t.painted) return t.painted;
+            const lut = growthLUT(Y);
+            const img = new ImageData(t.w, t.h), o = img.data;
+            for (let i = 0; i < t.k.length; i++) { const k = t.k[i]; if (!k) continue; const b = 4 * k, j = 4 * i; o[j] = lut[b]; o[j + 1] = lut[b + 1]; o[j + 2] = lut[b + 2]; o[j + 3] = lut[b + 3]; }
+            const c = document.createElement("canvas"); c.width = t.w; c.height = t.h;
+            c.getContext("2d").putImageData(img, 0, 0);
+            t.painted = c; t.key = Y;
+            return c;
+          }
+          const growthLayer = () => new TileLayer({
+            id: "wsf-growth",
+            getTileData: ({index, signal}) => rawTile({index, signal}),
+            onTileError: (e) => { if (!e || e.name !== "AbortError") say("wsf tile: " + ((e && e.message) || e)); },
+            tileSize: cfg.tile || 256, minZoom: 0, maxZoom: 14, refinementStrategy: "best-available", beforeId: slot(),
+            visible: st.gmode === "wsf" && !st.holding,
+            updateTriggers: {renderSubLayers: [st.y1]},
+            renderSubLayers: (p) => { if (!p.data) return null; const {west, south, east, north} = p.tile.bbox; return new BitmapLayer(p, {id: p.id + "-" + st.y1, data: null, image: paintRaw(p.data, st.y1), bounds: [west, south, east, north]}); },
+          });
+          // ---- the model's res 13 (res 12 under zoom 14), from zoom OTF13_Z: tiles of the store's own cells (the
+          // kernel sends each tile's cells, 8 bytes each, and every pixel's local cell), drawn
+          // with the same edge layer. Hexagons this small cost nothing as an image.
+          const OTF13_Z = 13;
+          const unzRaw = async (u8) => new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
+          function modelCol(at, o) {
+            // the same rules as the frame's model modes, for one cell's 8 bytes at o
+            if (!at[o + 6] || (st.gmode !== "allbuilt" && at[o + 4] !== 1)) return null;
+            if (st.gmode === "allbuilt") { const c = at[o]; return AB_RGB[c] ? [...AB_RGB[c], Math.round(120 + (A_FILL - 120) * at[o + 1] / 255)] : null; }
+            if (st.gmode === "struct") { const v = at[o + 3]; return v > 100 ? null : [...vir(Math.max(0, (v - 50) / 50)), A_FILL]; }
+            if (st.gmode === "first") { const fy = at[o + 5]; return fy ? [...yrCol(2000 + fy, hmeta.y0 || st.y0, hmeta.y1 || st.y1), A_FILL] : null; }
+            return null;
+          }
+          function tilePic13(d) {
+            const key = st.gmode + ":" + hexSeq;
+            if (d.col && d.ckey === key) return d;
+            if (!d.pic) {
+              const n = d.side, K = d.K, idx = new Uint8Array(2 * n * n);
+              for (let i = 0; i < d.ids.length; i++) { const v = d.ids[i]; if (v) { idx[2 * i] = v & 255; idx[2 * i + 1] = v >> 8; } }
+              const gh = Math.max(1, Math.ceil(K / GEO_W)), geo = new Float32Array(5 * GEO_W * gh * 4);
+              const Z = 2 ** d.z, lonC = (d.x + 0.5) / Z * 360 - 180;
+              for (let j = 0; j < K; j++) {
+                const r = ring(d.cells[j]);
+                if (!r) continue;
+                const m = Math.min(10, r.length - 1), o = (Math.floor(j / GEO_W) * 5 * GEO_W + 5 * (j % GEO_W)) * 4;
+                for (let q = 0; q < 10; q++) {
+                  let [lng, lat] = r[Math.min(q, m - 1)];
+                  if (lng - lonC > 180) lng -= 360; else if (lng - lonC < -180) lng += 360;
+                  const sn = Math.sin(lat * Math.PI / 180);
+                  geo[o + 2 * q] = ((lng + 180) / 360 * Z - d.x) * n;
+                  geo[o + 2 * q + 1] = ((0.5 - Math.log((1 + sn) / (1 - sn)) / (4 * Math.PI)) * Z - d.y) * n;
+                }
+              }
+              d.pic = {n, idx, geo, gh};
+            }
+            const col = new Uint8Array(COL_W * Math.max(1, Math.ceil(d.K / COL_W)) * 4);
+            for (let j = 0; j < d.K; j++) { const c = modelCol(d.attrs, 8 * j); if (c) col.set(c, 4 * j); }
+            d.col = col; d.ckey = key;
+            return d;
+          }
+          const otf13Layer = (visible) => new TileLayer({
+            id: "otf13-" + (hmeta.otf_ver || 0), visible,
+            getTileData: async ({index, signal}) => {
+              const u8 = await ask("otf13", hmeta.otf_ver || 0, index, signal);
+              if (!u8) return null;
+              const b = await unzRaw(u8), K = new DataView(b.buffer).getUint32(0, true);
+              const cb = new BigUint64Array(b.buffer.slice(4, 4 + 8 * K)), cells = new Array(K);
+              for (let j = 0; j < K; j++) cells[j] = cb[j].toString(16);
+              const attrs = b.slice(4 + 8 * K, 4 + 16 * K), ids = new Uint32Array(b.buffer.slice(4 + 16 * K));
+              return {K, cells, attrs, ids, side: Math.round(Math.sqrt(ids.length)), z: index.z, x: index.x, y: index.y};
+            },
+            onTileError: (e) => { if (!e || e.name !== "AbortError") say("res 13 tile: " + ((e && e.message) || e)); },
+            tileSize: 256, minZoom: OTF13_Z, maxZoom: 17, refinementStrategy: "no-overlap", debounceTime: 60, beforeId: slot(),
+            updateTriggers: {renderSubLayers: [hexSeq, st.gmode]},
+            renderSubLayers: (p) => {
+              const t = p.data ? tilePic13(p.data) : null;
+              if (!t) return null;
+              const {west, south, east, north} = p.tile.bbox;
+              return new HexEdgeLayer(p, {data: null, image: null, pic: t.pic, col: t.col, bounds: [west, south, east, north]});
+            },
+          });
+          const ring = (h) => { try { return cellToBoundary(h, true); } catch (e) { return null; } };
+          const outline = (id, h, color, width, m = map) => { const r = h ? ring(h) : null; return r ? new PathLayer({id, data: [r], getPath: (d) => d, getColor: color, widthUnits: "pixels", getWidth: width, beforeId: slot(m)}) : null; };
+          function layers() {
+            const out = [];
+            const z = map ? map.getZoom() : 0;
+            // preloaded from zoom 9 only: below it the tiles are decimated from L5 (slow). True color
+            // keeps every year mounted (cheap tiles, a scroll is instant); a false color tile reads three
+            // bands, so only the year shown is mounted and loads first. Paired, the imagery is the
+            // left map's, so none here
+            if (!st.pair && (st.holding || z >= 9)) {
+              if (S2GPU && st.s2comp === "tci") { s2Discover(); for (const y of s2Years()) out.push(...s2CogLayers(y)); }
+              else for (const y of S2Y) if (st.s2comp === "tci" || y === st.imgYear) out.push(s2Layer(y));
+            }
+            // while holding: the imagery, and over it only the two outlines
+            //
+            // kept in the stack while hidden (holding, zoomed out) so its tiles stay cached
+            // WSF under the hexagons, at every zoom: the context the hexagons sit in
+            out.push(growthLayer());
+            // the model's res 13 from OTF13_Z where it has run; the frame's hexagons otherwise
+            const res13 = MODEL_MODES.includes(st.gmode) && !!hmeta.otf && z >= OTF13_Z;
+            // the frame's colors (hcol) come a moment after its cells, so whether the hexagons are on
+            // screen is judged without them
+            const hexShow = !st.holding && st.gmode !== "wsf" && st.gmode !== "ov" && !res13 && z >= HEXZ, hexOn = hexShow && !!hcol;
+            // nothing on screen to keep (the first frame, or the hexagons hidden): the new frame shows as it loads
+            if (hmeta.seq && (!shownSeq || !hexShow)) shownSeq = hmeta.seq;
+            if (hmeta.seq && shownSeq !== hmeta.seq) {
+              const s = hmeta.seq;
+              if (swapFor !== s) { clearTimeout(swapT); swapFor = s; swapT = setTimeout(() => showFrame(s), HEX_SWAP_MS); }
+              out.push(hexLayer(hexShow, shownSeq));
+              out.push(hexLayer(false, s, () => showFrame(s)));
+            } else if (hmeta.seq) out.push(hexLayer(hexOn, hmeta.seq));
+            if (hmeta.otf) out.push(otf13Layer(!st.holding && st.gmode !== "ov" && res13));
+            const hv = hover != null && hover >= 0 ? outline("hover", hexes[hover], [255, 255, 255, 235], 2) : null;
+            if (hv) out.push(hv);
+            // gold on the dark basemap (was near-black on the light one)
+            const sc = searched ? outline("searched", searched, [255, 200, 40, 255], 3) : null;
+            if (sc) out.push(sc);
+            const pk = picked ? outline("picked", picked, [255, 200, 40, 255], 3) : null;
+            if (pk) out.push(pk);
+            return out;
+          }
+          // the pair's left side: the imagery years, mounted as on the map so a year step is instant,
+          // and over the imagery or Overture the same outlines as on the right: the hexagon under
+          // the pointer (on either side), the searched one and the picked one
+          function layers2() {
+            if (!st.pair || !map2) return [];
+            let out;
+            if (S2GPU && st.s2comp === "tci") { s2Discover(); out = s2Years().flatMap((y) => s2CogLayers(y, true)); }
+            else out = S2Y.filter((y) => st.s2comp === "tci" || y === st.imgYear).map((y) => s2Layer(y, true));
+            const hv = hover != null && hover >= 0 ? outline("hover-l", hexes[hover], [255, 255, 255, 235], 2, map2) : null;
+            if (hv) out.push(hv);
+            const sc = searched ? outline("searched-l", searched, [255, 200, 40, 255], 3, map2) : null;
+            if (sc) out.push(sc);
+            const pk = picked ? outline("picked-l", picked, [255, 200, 40, 255], 3, map2) : null;
+            if (pk) out.push(pk);
+            return out;
+          }
+          function update() {
+            if (ov) ov.setProps({layers: layers()});
+            if (ov2) ov2.setProps({layers: layers2()});
+            showOv(map, st.gmode === "ov" && !st.holding);
+            showOv(map2, false);
+            renderSide();
+          }
+          function labels(on) {
+            for (const m of [map, map2]) {
+              if (!m || !m.isStyleLoaded()) continue;
+              (m.getStyle().layers || []).forEach((l) => { if (l.layout && l.layout["text-field"] !== undefined) m.setLayoutProperty(l.id, "visibility", on ? "visible" : "none"); });
+            }
+          }
+
+          // ---- Overture, drawn by the map itself from Overture's PMTiles (the release the
+          // model's teachers read): land use, roads and buildings on the basemap, never over the
+          // imagery. O on one map shows it in the hexagons' place (Color by); in the pair, O cycles
+          // the right map through AEF Change, Overture and WSF. The land use drawn is what the land
+          // cover teachers take from it: residential and industrial land (built-up) and
+          // construction, quarries and landfill (construction; greenfield, planned but not
+          // broken, left out)
+          function addOv(m) {
+            if (!m || m.getSource("ov-bld")) return;
+            try {
+              m.addSource("ov-base", {type: "vector", url: "pmtiles://" + OV_PM + "/base.pmtiles"});
+              m.addSource("ov-tr", {type: "vector", url: "pmtiles://" + OV_PM + "/transportation.pmtiles"});
+              m.addSource("ov-bld", {type: "vector", url: "pmtiles://" + OV_PM + "/buildings.pmtiles"});
+              const before = slot(m);
+              for (const l of OV_LAYERS) m.addLayer({...l, layout: {...(l.layout || {}), visibility: "none"}}, m.getLayer(before) ? before : undefined);
+              ovShown.set(m, false);
+            } catch (e) { console.error("overture", e); }
+          }
+          function showOv(m, on) {
+            if (!m || !m.getLayer || !m.getLayer("ov-bld") || ovShown.get(m) === on) return;
+            ovShown.set(m, on);
+            for (const l of OV_LAYERS) m.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
+          }
+          function renderSide() {
+            const ovOn = !st.pair && st.gmode === "ov" && !st.holding;
+            const on = st.pair || ovOn;
+            side.classList.toggle("on", on);
+            if (!on) return;
+            const sw = (c, t, ln) => `<span><i class="${ln ? "ln" : ""}" style="background:${c}"></i>${t}</span>`;
+            if (ovOn) side.innerHTML = `<b>Overture ${esc(OV_PM.split("/").pop())}</b>` + sw(OV_C.bld, "buildings") + sw(OV_C.road, "roads", true)
+              + sw("rgba(230,159,0,.7)", "construction, quarries, landfill") + sw("rgba(155,165,175,.55)", "residential, industrial")
+              ;
+            else side.innerHTML = `<b>Sentinel-2 ${st.imgYear}</b><span>${esc(COMP_NAME[st.s2comp] || "")}</span><span><kbd>[</kbd> <kbd>]</kbd> year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> colors</span>`;
+          }
+          side.addEventListener("click", (e) => { const b = e.target.closest && e.target.closest("button[data-left]"); if (b) setLeft(b.getAttribute("data-left")); });
+          function setLeft(v) {
+            if (st.left === v) return;
+            st.left = v;
+            if (v === "s2" && st.s2comp !== "tci") send("s2comp", {comp: st.s2comp});
+            update();
+          }
+
+          // ---- the pair (P) ---------------------------------------------------------------
+          // a second map on the left, made the first time the pair opens; either map moves the
+          // other. The right is the map as it was (its layer, card and clicks); the left shows
+          // Sentinel-2 (the year as the hold leaves it) or Overture
+          let syncing = false;
+          function boot2() {
+            if (map2) return;
+            map2 = new maplibregl.Map({container: mapEl2, style: STYLE, center: map.getCenter(), zoom: map.getZoom(), attributionControl: {compact: true}});
+            map2.keyboard.disable();
+            if (root._otf) { root._otf.map2 = map2; root._otf.layers2 = () => layers2().map((l) => l.id); }
+            ov2 = new MapboxOverlay({interleaved: true, layers: [], onError: (e) => say("deck, left: " + (e && e.message ? e.message : e))});
+            map2.addControl(ov2);
+            map2.on("load", () => { labels(st.labels); addOv(map2); update(); });
+            const follow = (a, b) => a.on("move", () => {
+              if (syncing || !st.pair) return;
+              syncing = true;
+              b.jumpTo({center: a.getCenter(), zoom: a.getZoom(), bearing: a.getBearing(), pitch: a.getPitch()});
+              syncing = false;
+            });
+            follow(map, map2); follow(map2, map);
+            // the left side hovers and picks as the right does (no tooltip, as over the imagery held):
+            // the two sides are the same size under one camera, so a point is the same place on both
+            map2.on("mousemove", (e) => { const i = hexAt(e.lngLat); if (i !== hover) { hover = i; update(); } });
+            map2.on("mouseout", () => { if (hover != null && hover >= 0) { hover = null; update(); } });
+            map2.on("click", (e) => { const i = hexAt(e.lngLat); pickCell(i >= 0 ? hexes[i] : null, e.lngLat, e.point, st.left === "s2"); });
+            new ResizeObserver(() => { try { map2.resize(); } catch (e) {} }).observe(mapEl2);
+          }
+          function setPair(on) {
+            if (on === st.pair || !map) return;
+            if (on && st.holding) endHold(null);
+            st.pair = on;
+            root.classList.toggle("pair", on);
+            bPair.classList.toggle("on", on);
+            bPair.title = on ? "back to one map (P)" : "pair the map with Sentinel-2 (P)";
+            // the same zoom on both sides (each shows half the ground of one map), so the model and the
+            // hexagons work in the pair exactly as on one map
+            if (on) {
+              boot2();
+              map2.jumpTo({center: map.getCenter(), zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch()});
+              if (st.left === "s2" && st.s2comp !== "tci") send("s2comp", {comp: st.s2comp});
+            }
+            renderYear(); update();
+          }
+
+          // ---- hold: the imagery ------------------------------------------------------------
+          // hold SPACE, only (the mouse stays free, so it can rest off the
+          // building you are looking at, where the pointer would cover a small
+          // one; the press and hold on the map is gone). The
+          // imagery opens on the year the last
+          // hold left off at (2022 the first time); while holding, the wheel anywhere over the map or the card
+          // steps the imagery year instead of zooming; letting go of whichever
+          // started it ends it
+          let holdT = null, holdAt = null, holdBy = null, wheelAcc = 0, lastStep = 0, suppressClick = false, lastPt = null;
+          const stepImg = (d) => { const i = S2Y.indexOf(st.imgYear); const n = S2Y[Math.max(0, Math.min(S2Y.length - 1, (i < 0 ? S2Y.length - 1 : i) + d))]; if (n !== st.imgYear) { st.imgYear = n; renderYear(); update(); } };
+          function beginHold(x, y, by) {
+            holdT = null;
+            if (!map || st.holding) return;
+            st.holding = true;
+            holdBy = by;
+            if (by === "mouse") suppressClick = true;
+            mapEl.classList.add("holding");
+            mapEl.classList.toggle("key", by === "key");
+            // the wheel is the year while holding (the capture listener on root
+            // keeps it from the map, so scrollZoom stays on: disabling it
+            // mid-zoom left maplibre's zoom marked active, and scroll froze
+            // after the hold); a space hold leaves the map free to drag ("i'd
+            // like to be able to move the map when space is pressed"), a mouse
+            // hold cannot (the press is the hold)
+            if (by === "mouse") map.dragPan.disable();
+            tip.style.display = "none";
+            // false colors are stretched for the view: taken again if this hold is somewhere else
+            if (st.s2comp !== "tci") send("s2comp", {comp: st.s2comp});
+            renderYear(); update();
+          }
+          function endHold(by) {
+            if (by !== "key") { clearTimeout(holdT); holdT = null; holdAt = null; }
+            if (!st.holding || (by && by !== holdBy)) return;
+            st.holding = false; holdBy = null;
+            mapEl.classList.remove("holding");
+            if (map) map.dragPan.enable();
+            wheelAcc = 0;
+            renderYear(); update();
+            if (lastPt && map) showHexTip(lastPt);
+          }
+          mapEl.addEventListener("pointermove", (e) => {
+            lastPt = {x: e.clientX, y: e.clientY};
+            if (holdT && holdAt && Math.hypot(e.clientX - holdAt.x, e.clientY - holdAt.y) > SLOP) { clearTimeout(holdT); holdT = null; holdAt = null; }
+          }, true);
+          const endMouse = () => endHold("mouse"), endAny = () => endHold(null);
+          window.addEventListener("pointerup", endMouse, true);
+          window.addEventListener("pointercancel", endMouse, true);
+          window.addEventListener("blur", endAny);
+          // the space bar: down starts a hold at the pointer (or the map's
+          // center before the pointer has been over it), up ends it
+          function spaceDown() {
+            // paired, the imagery is already on the left
+            if (st.holding || !map || st.pair) return;
+            const r = mapEl.getBoundingClientRect();
+            const inMap = lastPt && lastPt.x >= r.left && lastPt.x <= r.right && lastPt.y >= r.top && lastPt.y <= r.bottom;
+            const pt = inMap ? lastPt : {x: r.left + r.width / 2, y: r.top + r.height / 2};
+            beginHold(pt.x, pt.y, "key");
+          }
+          const onKeyUp = (e) => {
+            if (e.key === " ") endHold("key");
+          };
+          window.addEventListener("keyup", onKeyUp);
+          root.addEventListener("wheel", (e) => {
+            if (!st.holding) return;
+            e.preventDefault(); e.stopPropagation();
+            wheelAcc += e.deltaY;
+            const now = performance.now();
+            if (Math.abs(wheelAcc) >= 40 && now - lastStep > 140) { stepImg(wheelAcc > 0 ? 1 : -1); wheelAcc = 0; lastStep = now; }
+          }, {capture: true, passive: false});
+          root.addEventListener("pointermove", (e) => { lastPt = {x: e.clientX, y: e.clientY}; }, true);
+          function showHexTip(pt) {
+            const r = mapEl.getBoundingClientRect();
+            const i = hexAt(map.unproject([pt.x - r.left, pt.y - r.top]));
+            if (i !== hover) { hover = i; update(); }
+            if (i < 0 || !hattrs || map.getZoom() < HEXZ) { tip.style.display = "none"; return; }
+            const p = pane.getBoundingClientRect();
+            tip.innerHTML = hexWords(i);
+            tip.style.display = "block";
+            tip.style.left = (pt.x - p.left + 14) + "px";
+            tip.style.top = (pt.y - p.top + 14) + "px";
+          }
+
+          // ---- search ------------------------------------------------------------------------
+          const PHOTON = "https://photon.komoot.io/api/";
+          let gcHits = [], gcSel = -1, gcTimer = null, gcSeq = 0, searched = null;
+          // drop the searched cell's outline, staying where the map is
+          function unsearch() {
+            searched = null; update();
+          }
+          // an H3 string in the box is a cell, not a place
+          const h3Of = (q) => { const h = q.trim().toLowerCase(); try { return /^[0-9a-f]{15}$/.test(h) && isValidCell(h) ? h : null; } catch (e) { return null; } };
+          const hitName = (f) => { if (f.h3) return "H3 " + f.h3; const p = f.properties || {}; return [p.name, p.street && !p.name ? p.street : null, p.city && p.city !== p.name ? p.city : null, p.state, p.country].filter(Boolean).join(", "); };
+          const hitKind = (f) => { if (f.h3) { const [la, lo] = cellToLatLng(f.h3); return `res ${getResolution(f.h3)}, ${la.toFixed(5)}, ${lo.toFixed(5)}`; } const p = f.properties || {}; return [p.osm_value, p.type].filter((x) => x && x !== "yes").join(", "); };
+          const gcHide = () => { hits.style.display = "none"; hits.replaceChildren(); gcSel = -1; };
+          const gcShow = () => {
+            hits.replaceChildren();
+            if (!gcHits.length) { gcHide(); return; }
+            gcHits.forEach((f, i) => { const r = el_("div", "at-hit" + (i === gcSel ? " sel" : "")); r.textContent = hitName(f); const k = el_("small"); k.textContent = hitKind(f); r.appendChild(k); r.onmousedown = (e) => { e.preventDefault(); gcFly(f); }; r.onmouseenter = () => { gcSel = i; gcShow(); }; hits.appendChild(r); });
+            hits.style.display = "block";
+          };
+          const gcAsk = async () => {
+            const q = gc.value.trim();
+            if (!q && searched) { searched = null; update(); }
+            if (q.length < 2) { gcHits = []; gcHide(); return; }
+            const s = ++gcSeq;
+            const h3 = h3Of(q);
+            if (h3) { gcHits = [{h3}]; gcSel = 0; gcShow(); return; }
+            const params = new URLSearchParams({q, limit: "6", lang: "en"});
+            if (map) { const c = map.getCenter(); params.set("lon", c.lng.toFixed(4)); params.set("lat", c.lat.toFixed(4)); }
+            try { const r = await fetch(PHOTON + "?" + params.toString()); const d = await r.json(); if (s !== gcSeq) return; gcHits = (d.features || []).filter((f) => f.geometry && f.geometry.coordinates); gcSel = gcHits.length ? 0 : -1; gcShow(); }
+            catch (e) { if (s === gcSeq) note("search: " + e.message, 4000); }
+          };
+          const gcFly = (f) => {
+            if (f.h3) {
+              // to the zoom that draws hexagons of the cell's own res, the middle
+              // of its zooms; finer than the finest drawn,
+              // about 80 px across; never out past the hexagons
+              const [lat, lon] = cellToLatLng(f.h3), r = getResolution(f.h3), L = cfg.res_ladder;
+              const zoom = Math.max(HEXZ, Math.min(17, L && r <= L[3] ? L[0] + (r - L[2] + 0.5) * L[1]
+                : Math.log2(78271.5 * Math.cos(lat * Math.PI / 180) * 80 / (2 * 1281256 / Math.pow(Math.sqrt(7), r)))));
+              searched = f.h3; gcHits = []; gcHide(); gc.blur(); update();
+              if (map) map.flyTo({center: [lon, lat], zoom, duration: 2200, essential: true});
+              return;
+            }
+            searched = null;
+            const [lon, lat] = f.geometry.coordinates;
+            const ext = (f.properties || {}).extent;
+            let zoom = 12;
+            if (ext && ext.length === 4) { const span = Math.max(Math.abs(ext[2] - ext[0]), Math.abs(ext[1] - ext[3]) * 2, 0.01); zoom = Math.log2(360 * ((mapEl.clientWidth || 1200) / 512) / span) - 0.3; }
+            zoom = Math.max(HEXZ, Math.min(16, zoom));
+            gc.value = hitName(f); gcHits = []; gcHide(); gc.blur();
+            if (map) map.flyTo({center: [lon, lat], zoom, duration: 2200, essential: true});
+          };
+          gc.addEventListener("input", () => { clearTimeout(gcTimer); gcTimer = setTimeout(gcAsk, 250); });
+          gc.addEventListener("focus", () => { if (gcHits.length) gcShow(); });
+          gc.addEventListener("blur", () => setTimeout(gcHide, 120));
+          gc.addEventListener("keydown", (e) => {
+            e.stopPropagation();
+            if (e.key === "ArrowDown" && gcHits.length) { gcSel = (gcSel + 1) % gcHits.length; gcShow(); e.preventDefault(); }
+            else if (e.key === "ArrowUp" && gcHits.length) { gcSel = (gcSel - 1 + gcHits.length) % gcHits.length; gcShow(); e.preventDefault(); }
+            else if (e.key === "Enter") { e.preventDefault(); if (gcHits.length) gcFly(gcHits[Math.max(0, gcSel)]); else { clearTimeout(gcTimer); gcAsk().then(() => { if (gcHits.length) gcFly(gcHits[0]); else note("no match: " + gc.value.trim(), 4000); }); } }
+            else if (e.key === "Escape") { gcHide(); gc.blur(); }
+          });
+
+          // ---- fill the window --------------------------------------------------------------
+          const FIT_CLS = "at-fit-on";
+          if (!document.getElementById("at-fit-style")) {
+            const s = document.createElement("style"); s.id = "at-fit-style";
+            s.textContent = ["notebook-actions-dropdown", "cell-actions-button", "drag-button", "expand-output-button", "fullscreen-output-button", "chrome-sidebar", "chrome-footer", "chrome-controls-top-right", "chrome-controls-bottom-right"].map((t) => "html." + FIT_CLS + " [data-testid='" + t + "']").join(",") + ",html." + FIT_CLS + " div[class*='top-[25vh]']{display:none!important}html." + FIT_CLS + "{overflow:hidden}";
+            document.head.appendChild(s);
+          }
+          function sizes() {
+            root.classList.toggle("fit", st.fit);
+            document.documentElement.classList.toggle(FIT_CLS, st.fit);
+            pane.style.height = st.fit ? "100vh" : (cfg.height || 780) + "px";
+            bFit.innerHTML = st.fit ? ICON.shrink : ICON.expand; bFit.title = st.fit ? "back to the notebook (X or Esc); full screen (F)" : "fill the window (X); full screen (F)";
+            setTimeout(() => { try { map && map.resize(); } catch (e) {} }, 30);
+          }
+          bFit.onclick = () => { st.fit = !st.fit; sizes(); };
+          bMore.onclick = (e) => { e.stopPropagation(); const open = more.style.display !== "block"; more.style.display = open ? "block" : "none"; yc.style.visibility = open ? "hidden" : ""; bMore.classList.toggle("on", open); };
+          more.addEventListener("click", (e) => e.stopPropagation());
+          const closeMore = () => { more.style.display = "none"; yc.style.visibility = ""; bMore.classList.remove("on"); };
+          root.addEventListener("click", () => { if (more.style.display === "block") closeMore(); });
+          window.addEventListener("resize", () => { if (st.fit) sizes(); });
+
+          // ---- keys ---------------------------------------------------------------------------
+          root.tabIndex = 0;
+          const onKey = (e) => {
+            const path = e.composedPath ? e.composedPath() : [];
+            if (!st.fit && !path.includes(root)) return;
+            const tgt = path[0] || e.target;
+            if (tgt && /^(INPUT|SELECT|TEXTAREA)$/.test(tgt.tagName)) return;
+            const k = e.key, lo = st.y0, hi = st.y1;
+            if (k === " ") { if (!e.repeat) spaceDown(); }
+            // paired, O cycles the right map through AEF Change, Overture and WSF (the left stays Sentinel-2)
+            else if ((k === "o" || k === "O") && st.pair) { if (!e.repeat) { const cyc = ["earth", "much", "ov", "wsf"]; st.want = cyc[(cyc.indexOf(st.gmode) + 1) % cyc.length]; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); } }
+            // Color by: A AEF Change, O Overture, W WSF; R and Y only with the models on
+            else if (/^[aAoOwWeE]$/.test(k) || (cfg.models && /^[rRyY]$/.test(k))) { const w = {e: "earth", a: "much", o: "ov", r: "struct", y: "first", w: "wsf"}[k.toLowerCase()]; st.want = w; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); }
+            // the kinds key's All (Q) / Built (W); otherwise W shows or hides WSF
+            else if (/^[qQwW]$/.test(k)) { if (st.gmode !== "kinds") return; st.focus = (k === "q" || k === "Q") ? "all" : "built"; recolorHex(); styleKey(); update(); }
+            else if (k === "p" || k === "P") setPair(!st.pair);
+            else if (k === "[" || k === "]") stepImg(k === "]" ? 1 : -1);
+            // B: the imagery's first year and its latest, back and forth (from any other year, the
+            // latest), while it shows: holding space, or on the pair's left side
+            else if (k === "b" || k === "B") {
+              if (!(st.holding || (st.pair && st.left === "s2"))) return;
+              const a = S2Y[0], b = S2Y[S2Y.length - 1];
+              st.imgYear = st.imgYear === b ? a : b; renderYear(); update();
+            }
+            else if (k === ";" || k === "'") { st.s2scale = Math.round(10 * Math.max(0.3, Math.min(2.5, st.s2scale + (k === "'" ? 0.1 : -0.1)))) / 10; gam.value = st.s2scale; clearTimeout(gamT); gamT = setTimeout(() => send("s2scale"), 250); }
+            else if (k === "-" || k === "=") { const v = Math.max(aefYears[0], Math.min(hi - 1, lo + (k === "=" ? 1 : -1))); if (v !== lo) { st.y0 = v; winSent = [st.y0, st.y1]; styleWin(); send("aef"); } }
+            else if (k === "_" || k === "+") { const v = Math.max(lo + 1, Math.min(aefYears[aefYears.length - 1], hi + (k === "+" ? 1 : -1))); if (v !== hi) { st.y1 = v; winSent = [st.y0, st.y1]; styleWin(); send("aef"); } }
+            else if (k === "l" || k === "L") { st.labels = !st.labels; labels(st.labels); swLab.sty(); }
+            else if (k === "x" || k === "X") { st.fit = !st.fit; sizes(); }
+            else if (k === "c" || k === "C") { const i = COMPS.findIndex(([c]) => c === st.s2comp); setComp(COMPS[(i + 1) % COMPS.length][0]); }
+            // full screen (the browser's own; Esc or F again leaves it), filling the window inside it
+            else if (k === "f" || k === "F") {
+              if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+              else { if (!st.fit) { st.fit = true; sizes(); } (root.requestFullscreen ? root.requestFullscreen() : Promise.reject()).catch(() => note("full screen is not allowed here", 2500)); }
+            }
+            else if (k === "/") gc.focus();
+            else if (k === "Escape") { if (searched) unsearch(); else if (about.style.display === "flex") about.style.display = "none"; else if (more.style.display === "block") closeMore(); else if (cardData) closeCard(); else if (st.fit) { st.fit = false; sizes(); } }
+            else return;
+            e.preventDefault();
+          };
+          window.addEventListener("keydown", onKey);
+
+          // ---- camera and click ----------------------------------------------------------------
+          let seq = 0, lastView = "";
+          function sendView() {
+            if (!map) return;
+            const c = map.getCenter();
+            const v = {longitude: c.lng, latitude: c.lat, zoom: map.getZoom(), w: mapEl.clientWidth, h: mapEl.clientHeight};
+            const key = JSON.stringify(v);
+            if (key === lastView) return;
+            lastView = key; v.n = ++seq;
+            model.set("view", JSON.stringify(v)); model.save_changes();
+          }
+          const adminAt = (pt) => {
+            const out = {};
+            const one = (k) => { const id = "ov-div-" + k; if (!map.getLayer(id)) return null; const fs = map.queryRenderedFeatures(pt, {layers: [id]}); return fs && fs.length ? fs[0].properties : null; };
+            try { const r = one("region"); if (r) out.region = r["@name"] || r.names || null; const c = one("county"); if (c) out.county = c["@name"] || c.names || null; const l = one("locality"); if (l) out.locality = l["@name"] || l.names || null; } catch (e) {}
+            return out;
+          };
+          function boot() {
+            const home = cfg.home || {longitude: 3.6, latitude: 6.46, zoom: 11};
+            map = new maplibregl.Map({container: mapEl, style: STYLE, center: [home.longitude, home.latitude], zoom: home.zoom, attributionControl: {compact: true}});
+            map.keyboard.disable();
+            map.doubleClickZoom.enable();
+            root._otf = {map, st, hmeta: () => hmeta, hexShown: () => shownSeq, tiles: () => tlog, s2: () => ({...s2Stat, warm: s2Warm, sources: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.ids.size])), batches: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.batches.length]))})};  // for headless tests
+            map.addControl(new maplibregl.NavigationControl({showCompass: false}), "bottom-left");
+            ov = new MapboxOverlay({interleaved: true, layers: [], onError: (e) => say("deck: " + (e && e.message ? e.message : e))});
+            map.addControl(ov);
+            map.on("load", () => {
+              labels(st.labels);
+              addOv(map);
+              if (cfg.div_pm && !map.getSource("ov-div")) {
+                try {
+                  map.addSource("ov-div", {type: "vector", url: "pmtiles://" + cfg.div_pm});
+                  for (const k of ["region", "county", "locality"]) map.addLayer({id: "ov-div-" + k, type: "fill", source: "ov-div", "source-layer": "division_area", filter: ["all", ["==", ["get", "subtype"], k], ["==", ["get", "class"], "land"]], paint: {"fill-opacity": 0}}, slot());
+                } catch (e) { console.error("divisions", e); }
+              }
+              update(); sendView(); renderYear();
+            });
+            map.on("moveend", sendView);
+            // a new view: the footprints under it asked for
+            // (and the batches near it mounted, the far ones let go)
+            map.on("moveend", () => { if (S2GPU && st.s2comp === "tci") { s2Discover(); update(); } });
+            map.on("zoomend", () => { update(); renderYear(); styleKey(); });
+            // a zoom in crossing 8.3 (the kernel's _AHEAD_ZOOM) tells the kernel
+            // at once, so it starts reading before the hexagons' zoom
+            let aheadSent = false;
+            map.on("zoom", () => { styleSoon(); const z = map.getZoom(); if (z < 8.3) aheadSent = false; else if (!aheadSent && z < HEXZ) { aheadSent = true; sendView(); } });
+            map.on("mousemove", (e) => {
+              if (holdT) return;
+              // over the imagery: the white outline follows the pointer, no tooltip
+              if (st.holding) { const i = hexAt(e.lngLat); if (i !== hover) { hover = i; update(); } return; }
+              showHexTip({x: e.originalEvent.clientX, y: e.originalEvent.clientY});
+            });
+            map.on("mouseout", () => { tip.style.display = "none"; if (hover != null && hover >= 0) { hover = null; update(); } });
+            map.on("click", (e) => {
+              if (suppressClick) { suppressClick = false; return; }
+              const i = hexAt(e.lngLat);
+              pickCell(i >= 0 ? hexes[i] : null, e.lngLat, e.point, st.holding);
+            });
+            map.on("error", (ev) => { if (ev && ev.error && ev.error.message && !/tile|404/i.test(ev.error.message)) say("map: " + ev.error.message); });
+            new ResizeObserver(() => { try { map.resize(); } catch (e) {} fitCard(); }).observe(mapEl);
+            window.__cmMaps = () => [map];
+            window.__cmState = () => ({st: Object.assign({}, st), hex: N, res, hmeta, tiles: tstat, card: cardData, status: model.get("status"),
+              lc: hattrs ? Array.from({length: N}, (_, i) => hattrs[HB * i + 7]).reduce((c, v) => (c[v]++, c), [0, 0, 0, 0]) : null});
+            window.__cmTiles = () => ({log: tlog, paints: ptimes, frames: flog});
+            // for tests: the center of the first hexagon whose biggest step is year y and that moved a fair amount
+            window.__cmHexAt = (y) => { const b = map.getBounds(); for (let i = 0; i < N; i++) if (hattrs && hattrs[HB * i] === y - 2000 && hattrs[HB * i + 1] >= FAIR) { const r = cellToBoundary(hexes[i], true); const c = r.slice(0, -1).reduce((a, p) => [a[0] + p[0] / (r.length - 1), a[1] + p[1] / (r.length - 1)], [0, 0]); if (b.contains(c) && map.project(c).x < mapEl.clientWidth - 420 && map.project(c).y > 200) return c; } return null; };
+          }
+
+          // ---- the kernel's data -----------------------------------------------------------------
+          const flog = [];  // per frame received, for the tests
+          const loadHex = () => {
+            const tl = performance.now();
+            const cb = bytesOf(model.get("cells")), ab = bytesOf(model.get("hattrs"));
+            const seq0 = hmeta.seq;
+            try { hmeta = JSON.parse(model.get("hmeta") || "{}"); } catch (e) { hmeta = {}; }
+            // the kinds are grouped again for every new frame: what was hidden no longer means the same
+            if (hmeta.seq !== seq0) st.hideKinds.clear();
+            // zoomed out of Kinds of change: back to AEF Change, and it stays there when zooming in again
+            if (kindsWait()) st.want = "much";
+            st.gmode = drawnMode();
+            styleFill();
+            if (!cb || !cb.length) { hexes = []; N = 0; hexIndex = new Map(); res = -1; hattrs = null; hcol = null; hcol32 = null; renderYear(); styleKey(); update(); return; }
+            const ids = new BigUint64Array(copyOf(cb));
+            N = ids.length; hexes = new Array(N); hexIndex = new Map();
+            for (let i = 0; i < N; i++) { const h = ids[i].toString(16); hexes[i] = h; hexIndex.set(h, i); }
+            try { res = getResolution(hexes[0]); } catch (e) { res = -1; }
+            hattrs = ab && ab.length === HB * N ? new Uint8Array(copyOf(ab)) : null;
+            hover = null;
+            recolorHex(); renderYear(); styleKey(); update();
+            flog.push({seq: hmeta.seq, n: N, t: Date.now(), ms: performance.now() - tl});
+          };
+          let pendHex = null;
+          const hexSoon = () => { clearTimeout(pendHex); pendHex = setTimeout(loadHex, 0); };
+          model.on("change:cells", hexSoon);
+          model.on("change:hattrs", hexSoon);
+          model.on("change:hmeta", hexSoon);
+          model.on("change:card", renderCard);
+          model.on("change:status", () => say(model.get("status")));
+          model.on("change:config", () => { try { cfg = JSON.parse(model.get("config") || "{}"); } catch (e) { cfg = {}; } update(); });
+          try {
+            sizes(); boot(); styleRows(); loadHex(); renderCard(); say(model.get("status"));
+          } catch (e) { say("boot: " + e.message); console.error(e); }
+          return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("keyup", onKeyUp); window.removeEventListener("pointerup", endMouse, true); window.removeEventListener("pointercancel", endMouse, true); window.removeEventListener("blur", endAny); document.documentElement.classList.remove(FIT_CLS); try { map && map.remove(); } catch (e) {} };
+        }
+        export default {render};
+        """.replace("__DEPS__", _DEPS)
+
+    return (ChangeMap,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## How it works
+
+    **AlphaEarth, folded to H3.** Every 10 m pixel of the AlphaEarth
+    Foundations embedding is 64 numbers describing the ground for one year.
+    For the view on screen, the notebook reads each year in the window
+    (2023 to 2025 by default, 2017 to 2025 available) from Source
+    Cooperative: the COG overviews at coarser hexagons, the zarr mosaic
+    from res 11 in. Each pixel's lon/lat goes through an h3ronpy UDF inside
+    DataFusion (via xarray-sql), and the pixels are averaged per cell, one
+    fold per year. The hexagon size follows the zoom.
+
+    **The brightest patch, not the average.** The fold runs one H3 level
+    finer than the hexagons on screen (res 9 cells under res 8 hexagons at
+    zoom 9), about one pixel of the read per finer cell. Everything below
+    is worked out per finer cell; then h3ronpy's `change_resolution` gives
+    each finer cell its parent hexagon, and each hexagon takes its
+    most-changed finer cell whole: its change, its year, its kind, its
+    steps. A small site that changed a lot inside a hexagon of quiet ground
+    keeps the hexagon lit instead of being averaged away.
+
+    **How far it moved.** Each finer cell's vector is normalized every
+    year, and `disp` is 1 minus the cosine between the first and last year
+    read: 0 means the numbers did not move. AEF Change (`S`) colors
+    hexagons by `disp` in viridis, stretched to this view's 2nd to 98th
+    percentile, so the colors rank hexagons against their neighbors, not
+    the world. Ground that barely moved is drawn faint.
+
+    **On built ground only.** AEF Change draws a hexagon only when its peak
+    reads built (built-up, road or construction) in the last year read and
+    at least half of its finer cells do (`BUILT_SHARE`). The change itself
+    is AlphaEarth's alone; the land cover reader below decides only which
+    hexagons are drawn. Its teacher changes with the zoom: below zoom 11.8,
+    ESA WorldCover 2021 (the line under the buttons says so); from 11.8,
+    Impact Observatory and Overture, with WorldCover standing in until
+    Impact Observatory has been read. More in `docs/aef-change.md`.
+
+    **Kinds of change (turned off here, `KINDS_ON`).** For every finer cell, the change is its last
+    year's vector minus its first. The mean change over the whole view is
+    taken off first: the embeddings drift as a whole between years, and
+    without this every kind would lean the same way. The finer cells in the
+    top quarter of the view by `disp` are kept, their change directions
+    normalized, and grouped by spherical k-means into six kinds (k-means++
+    start, fit on a sample of 20,000, then every kept cell goes to its
+    nearest kind). Kinds are numbered largest first and drawn in the
+    Okabe-Ito colors, fuller the more the hexagon moved; hexagons in no
+    kind are faint gray. The grouping needs at least 300 moved cells. Since
+    the kinds are the view's own, kind 1 here is not kind 1 in the next
+    view, and hiding a kind lasts until the view changes.
+
+    Zoomed out the groups change a lot from one zoom to the next, so Kinds
+    of change is drawn only from hexagon res 10 (zoom 11.8, `KINDS_MIN_RES`
+    in the constants), and only once the land cover below has been read
+    for the view. Until then the map is AEF Change, its button is
+    grayed, and a line under it gives the zoom it appears at and the zoom
+    now. When it is ready the button flashes and keeps a small blue dot;
+    the map does not switch by itself, its button does. Zooming back out returns
+    to AEF Change.
+
+    **The land cover, read from AlphaEarth every year.** To name a kind,
+    the notebook learns in each view what the land cover looks like in
+    AlphaEarth, year by year: a logistic regression per year on the 64
+    numbers, one class per finer cell, among trees, grass, cropland,
+    built-up, bare, water, wetland, road and construction. The teachers,
+    per finer cell:
+
+    - Impact Observatory's annual land cover (10 m, 2017 to 2023, on
+      Planetary Computer) teaches its own year on all ground. 2024 and 2025
+      have no map, so the nearest year's map teaches only ground that
+      barely moved (at or under the view's median `disp`).
+    - Overture roads and rail (major roads by width), read from Overture's
+      own PMTiles (the vector tiles under the view, a few MB), make a cell a road;
+      its land use makes construction sites, quarries and landfill
+      "construction", and residential and industrial land "built-up".
+      Overture describes today, so it teaches the last year on all ground
+      and earlier years only on ground that barely moved.
+    - ESA WorldCover 2021 stands in, on hexagons that are mostly one class,
+      until Impact Observatory has been read.
+
+    A cell teaches only when 70% of it is one class, and a class needs 30
+    examples to be learned. The teachers are read only from zoom 11.8.
+    When AlphaEarth has to be downloaded for a view, they are read at the
+    same time (they are small next to it), so Kinds of change is ready with
+    the hexagons; when AlphaEarth is already in memory, the hexagons come
+    at once and the land cover a few seconds after. The key gives each kind's most
+    common pair of first- and last-year readings and its share. The model
+    can only name the classes it saw in the view; the card lists them.
+
+    **The change year.** Every year-to-year step is scored the same way
+    (1 minus the cosine). Because of the drift between years (over Lagos
+    the 2024 to 2025 median step is about twice the others) each step is
+    divided by that year's median step in view, and the change year is the
+    step that stands out most. The key gives each kind's most common
+    change year; the card shows a clicked hexagon's steps against 1.
+
+    **The whole history, zoomed in.** From about zoom 13.2 (res 11, where
+    the full mosaic is read and a view is small) every AlphaEarth year from
+    2017 to 2025 is read in the background once the window's hexagons are
+    up. The card then says what the ground did around its change year: one
+    step that held, came back (by the last year closer to the ground before
+    than to the change year), changes this much most years (the step is
+    under twice the cell's own median step), kept moving after, or too
+    recent to tell. It describes; nothing is hidden because of it.
+
+    **What is there (ESA WorldCover 2021).** The same fold on ESA's class
+    raster: a count of pixels per class per hexagon, shown as shares on the
+    card. It is one year only, so it describes the ground and dates
+    nothing.
+
+    **What happened (Sentinel-2).** Holding space swaps the hexagons for
+    Earth Genome's yearly true-color mosaic, 2022 to 2025 (found through
+    their STAC, holes filled from the temporal mosaic), so what a kind
+    points to can be checked by eye. Nothing colored is drawn over it,
+    only the outlines of the hovered, picked and searched hexagons.
+
+    **Drawn as tiles.** The hexagons reach the browser as map tiles in
+    which each pixel names the hexagons near it. The shader draws each
+    hexagon's edge from its H3 boundary (h3-js), so edges stay smooth at
+    any zoom. Colors come from a small table, so switching modes or hiding
+    a kind recolors without new tiles.
+    """)
+    return
+
+
+@app.cell
+def _(
+    AEF_FROM0,
+    AEF_TO0,
+    AEF_YEARS_ALL,
+    ALPHA_FILL,
+    ALPHA_QUIET,
+    ChangeMap,
+    HEX_ZOOM,
+    HOLD_MS,
+    HOLD_SLOP_PX,
+    HOME,
+    KINDS_MIN_ZOOM,
+    LABELS_SLOT,
+    BASE_RES,
+    MAX_RES,
+    MOSAIC_MIN_RES,
+    PER_RES,
+    ZOOM0,
+    OV_DIV_PM,
+    OV_RELEASE,
+    RASTER_TILE,
+    S2_SCALE0,
+    S2_TILE_MIN_Z,
+    S2_YEAR0,
+    S2_YEARS,
+    VIEW_H,
+    VIRIDIS,
+    WC_CLASSES,
+    json,
+    mo,
+):
+    # ---- the map: built ONCE, empty; never re-runs for a parameter ---------------
+    # as an app (marimo run) it fills the window from the start; in the editor
+    # it sits in the page (X fills the window, Esc brings it back)
+    try:
+        _fit = mo.app_meta().mode == "run"
+    except Exception:
+        _fit = False
+    cmap = ChangeMap(config=json.dumps({
+        "height": VIEW_H, "home": dict(HOME), "labels_slot": LABELS_SLOT, "tile": RASTER_TILE,
+        "s2_year": S2_YEAR0, "s2_scale": S2_SCALE0, "s2_gen": 0, "s2_years": list(S2_YEARS), "s2_min_z": S2_TILE_MIN_Z,
+        "aef_from": AEF_FROM0, "aef_to": AEF_TO0, "aef_years": list(AEF_YEARS_ALL),
+        "hex_zoom": HEX_ZOOM, "kinds_zoom": KINDS_MIN_ZOOM, "div_pm": OV_DIV_PM, "ov_pm": f"https://tiles.overturemaps.org/{OV_RELEASE}", "fit": _fit, "hold_ms": HOLD_MS, "hold_slop": HOLD_SLOP_PX,
+        "viridis": VIRIDIS, "alpha_fill": ALPHA_FILL, "alpha_quiet": ALPHA_QUIET,
+        "res_ladder": [ZOOM0, PER_RES, BASE_RES, MAX_RES],
+        "otf_zoom": 13.0,
+        # the shared models off for now: Color by is AEF Change, Overture and WSF, nothing runs
+        # the models (True brings back All built, Structure reading and First year built)
+        "models": False,
+        # true color read and drawn in the browser (deck.gl-raster); False: the kernel's PNG tiles
+        "s2_gpu": True,
+    }))
+    HOLD = {
+        "frame": None, "sent": None, "box": None, "res": None, "vs": None,
+        "busy": False, "pending": None, "pending_force": False, "task": None, "loop": None,
+        "s2scale": S2_SCALE0, "s2gen": 0, "y0": AEF_FROM0, "y1": AEF_TO0,
+        "hit": None, "pick_n": None, "card": None, "memo": {}, "aef": {}, "wc": {}, "io": {}, "ov": {},
+        "h_cam": None, "h_ctl": None, "h_pick": None, "runs": 0, "hex_status": "", "place": None,
+    }
+    cmap
+    return HOLD, cmap
+
+
+@app.cell
+def _(
+    AEF_YEARS_ALL,
+    CARRY_RES,
+    CELL_KM2,
+    HEX_TILE_PX,
+    HEX_UP,
+    HEX_ZOOM,
+    HIST_MIN_RES,
+    HOLD,
+    IO_YEARS,
+    HOME,
+    KINDS_MIN_RES,
+    LC_VOCAB,
+    SETTLE,
+    WC_CLASSES,
+    WC_CODES,
+    aef_fold,
+    io_fold,
+    ov_fold,
+    MOSAIC_MIN_RES,
+    BASE_RES,
+    PER_RES,
+    ZOOM0,
+    box_km2,
+    OTF_CLASSES,
+    OTF_GROUND,
+    STORE,
+    otf_card,
+    otf_covered,
+    otf_on_frame,
+    otf_run,
+    wsf_label,
+    wsf_tile_png,
+    asyncio,
+    build_frame,
+    cmap,
+    contains,
+    coordinates_to_cells,
+    cpu,
+    division_at,
+    json,
+    np,
+    pa,
+    pad_box,
+    re,
+    res_for_view,
+    s2_items_json,
+    s2_set_composite,
+    s2_set_scale,
+    s2_tile_png,
+    time,
+    traceback,
+    view_to_bbox,
+    wc_fold,
+    zlib,
+):
+    # ---- wiring: the camera loop, the click and the controls. Re-runs freely. -----
+    try:
+        HOLD["loop"] = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    HOLD["runs"] += 1
+    # one frame build at a time: they share the DuckDB connection's registered tables
+    HOLD.setdefault("build_lock", asyncio.Lock())
+    _WC_NAME = dict(WC_CLASSES)
+
+    def _hex_tile(fr, z, x, y):
+        """A map tile of the frame's hexagons as cell numbers: HEX_TILE_PX a
+        side, each pixel 1 + the frame row of the hexagon its center falls in
+        (0 none), uint32 little-endian, deflated. The browser colors it."""
+        T, n = HEX_TILE_PX, 2 ** z
+        f = (np.arange(T) + 0.5) / T
+        lon = (x + f) / n * 360.0 - 180.0
+        lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + f) / n))))
+        LON, LAT = np.meshgrid(lon, lat)
+        c = pa.array(coordinates_to_cells(LAT.ravel(), LON.ravel(), fr["res"])).to_numpy(zero_copy_only=False).astype(np.uint64)
+        ids = fr["cellid"]
+        if not len(ids):
+            return None
+        i = np.clip(np.searchsorted(ids, c), 0, len(ids) - 1)
+        hit = ids[i] == c
+        if not hit.any():
+            return None
+        return zlib.compress(np.where(hit, i + 1, 0).astype("<u4").tobytes(), 1)
+
+    def _otf_tile(z, x, y):
+        """A map tile of the model's res 13 cells (res 12 under zoom 14), straight
+        from the store (as segments-map draws its res 13): the tile's own cells and 8 bytes each
+        (class + 1, built share, building share, structure %, ground code, first
+        year built - 2000, coverage, 0), then each pixel's 1-based local cell,
+        deflated. Only the cells in this tile cross, however many the view holds."""
+        f = STORE["fixed"]
+        if f is None or not STORE["years"]:
+            return None
+        T, n = HEX_TILE_PX, 2 ** z
+        fr_ = (np.arange(T) + 0.5) / T
+        lon = (x + fr_) / n * 360.0 - 180.0
+        lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + fr_) / n))))
+        LON, LAT = np.meshgrid(lon, lat)
+        if z < 15:
+            # coarser under map zoom 14 (tile zoom 15: the 256 px tiles sit a zoom above the
+            # map's 512 px ones): res 12 at tile zoom 14, res 11 below, where a res 13 hexagon is
+            # a screen pixel or less and a whole tile of them passes the 65,535 a tile can index.
+            # Each coarser cell is the group-by of its res 13 rows, as the frame's hexagons are
+            r_ = 12 if z == 14 else 11
+            c = pa.array(coordinates_to_cells(LAT.ravel(), LON.ravel(), r_)).to_numpy(zero_copy_only=False).astype(np.uint64)
+            u, inv = np.unique(c, return_inverse=True)
+            at = otf_on_frame(u, r_, sorted(STORE["years"]))
+            if at is None:
+                return None
+            keep = at[:, 6] > 0
+            if not keep.any():
+                return None
+            new = np.cumsum(keep).astype(np.uint32)
+            idx = np.where(keep[inv], new[inv], 0).astype(np.uint32)
+            attrs = np.hstack([at[keep], np.zeros((int(keep.sum()), 1), np.uint8)]).astype(np.uint8)
+            head = np.array([int(keep.sum())], "<u4").tobytes()
+            return zlib.compress(head + u[keep].astype("<u8").tobytes() + attrs.tobytes() + idx.astype("<u4").tobytes(), 1)
+        c = pa.array(coordinates_to_cells(LAT.ravel(), LON.ravel(), 13)).to_numpy(zero_copy_only=False).astype(np.uint64)
+        cells = f["cell"]
+        i = np.clip(np.searchsorted(cells, c), 0, len(cells) - 1)
+        hit = cells[i] == c
+        if not hit.any():
+            return None
+        u, inv = np.unique(i[hit], return_inverse=True)
+        if len(u) > 65535:
+            return None
+        idx = np.zeros(T * T, np.uint32)
+        idx[hit] = inv + 1
+        ys = sorted(STORE["years"])
+        last = STORE["years"][ys[-1]]
+        P = last["P"][u].astype(np.int32)
+        cls = np.where(P.sum(1) > 0, P.argmax(1) + 1, 0)
+        built = P[:, [4, 5, 6]].sum(1)
+        first = np.zeros(len(u), np.int32)
+        for y_ in ys:
+            Py = STORE["years"][y_]["P"][u].astype(np.int32)
+            first = np.where((first == 0) & (Py[:, [4, 5, 6]].sum(1) >= 128), y_ - 2000, first)
+        attrs = np.stack([cls, np.clip(built, 0, 255), P[:, 6], last["s"][u], last["c"][u], first,
+                          np.full(len(u), 255), np.zeros(len(u), np.int32)], 1).astype(np.uint8)
+        head = np.array([len(u)], "<u4").tobytes()
+        return zlib.compress(head + cells[u].astype("<u8").tobytes() + attrs.tobytes() + idx.astype("<u4").tobytes(), 1)
+
+    async def _tile_fn(src, z, x, y, year):
+        t0 = time.time()
+        if src == "hex":
+            fr = HOLD["frame"]
+            if fr is None or fr.get("seq") != year:
+                raise RuntimeError("stale hexagon frame")
+            ts = {}
+
+            def _job():
+                ts["s"] = time.time()
+                r = _hex_tile(fr, z, x, y)
+                ts["e"] = time.time()
+                return r
+
+            out = await cpu(_job)
+            cmap.tile_times[(src, z, x, y, year)] = {"wait": 1e3 * (ts["s"] - t0), "run": 1e3 * (ts["e"] - ts["s"])}
+            return out
+        elif src == "wsfidx":
+            out = await wsf_tile_png(z, x, y)
+        elif src == "otf13":
+            out = await cpu(_otf_tile, z, x, y)
+        elif src == "s2i":
+            out = await s2_items_json(z, x, y, year)
+        else:
+            out = await s2_tile_png(z, x, y, year)
+        cmap.tile_times[(src, z, x, y, year)] = {"run": 1e3 * (time.time() - t0)}
+        return out
+
+    cmap.tile_fn = _tile_fn
+
+    def _say(msg):
+        # an unchanged status must still register in the browser, so a
+        # zero-width space toggles on repeats
+        try:
+            if cmap.status == msg:
+                msg = msg + "​" if not msg.endswith("​") else msg[:-1]
+            cmap.status = msg
+        except Exception:
+            pass
+
+    def _cfg(**kw):
+        c = json.loads(cmap.config or "{}")
+        c.update(kw)
+        cmap.config = json.dumps(c)
+
+    def _spawn(coro):
+        try:
+            return asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            loop = HOLD.get("loop")
+            return asyncio.run_coroutine_threadsafe(coro, loop) if loop else None
+
+    def _vsd(vs):
+        if vs is None:
+            return dict(HOME)
+        if isinstance(vs, str):
+            try:
+                vs = json.loads(vs)
+            except Exception:
+                return dict(HOME)
+        out = {"longitude": float(vs["longitude"]), "latitude": float(vs["latitude"]), "zoom": float(vs["zoom"])}
+        if vs.get("w") and vs.get("h"):
+            out["w"], out["h"] = float(vs["w"]), float(vs["h"])
+        return out
+
+    # ---- the hexagons -------------------------------------------------------------
+    def _paint():
+        """Send the frame once: 9 bytes per hexagon, colored in the browser."""
+        fr = HOLD["frame"]
+        if fr is None or HOLD["sent"] is fr:
+            return
+        big, lv = fr["big"], fr["level"]
+        yc = np.where(big > 0, big - 2000, 0).astype(np.uint8)
+        lb = np.where(np.isnan(lv), 0, 1 + np.round(254 * np.nan_to_num(lv))).astype(np.uint8)
+        tc = np.where(fr["top"] >= 0, fr["top"] + 1, 0).astype(np.uint8)
+        ts = np.round(255 * np.clip(fr["top_share"], 0, 1)).astype(np.uint8)
+        # the whole history, when read: the change peak's code (0 not read,
+        # see _trajectory)
+        ch = fr["ccode"].astype(np.uint8)
+        # the biggest yearly step as a multiple of the usual, in tenths (0 none)
+        sb = np.round(10 * np.clip(np.nan_to_num(fr["stand"]), 0, 25.5)).astype(np.uint8)
+        # what AlphaEarth reads it as over the years (lcy): 0 no reading, 1 the
+        # same class every year, 2 the class changed, 3 changed and built-up,
+        # road or construction in some year (the key's All / Built)
+        lcy = fr.get("lcy")
+        lc = np.zeros(len(big), np.uint8)
+        if lcy is not None and len(lcy) == len(big) and lcy.shape[1]:
+            ok = lcy >= 0
+            same = np.where(ok, lcy, 99).min(1) == np.where(ok, lcy, -1).max(1)
+            built = np.isin(lcy, [LC_VOCAB.index(c) for c in ("built-up", "road", "construction")]).any(1)
+            lc = np.where(~ok.any(1), 0, np.where(same, 1, np.where(built, 3, 2))).astype(np.uint8)
+        # 1 when drawn on built ground (see BUILT_SHARE); every hexagon when the frame is not built only
+        bh = fr.get("built_h")
+        bt = (bh.astype(np.uint8) if bh is not None and len(bh) == len(big) and fr.get("built_only") else np.ones(len(big), np.uint8))
+        # the shared models' answers kept in res 13 (see otf_run), as 7 more bytes per hexagon:
+        # All built class + 1, built share, building share, structure %, ground code, first
+        # year built - 2000, coverage (0 where the model has not run here)
+        om = otf_on_frame(fr["cellid"], HOLD["res"], list(range(int(fr["years"][0]), int(fr["years"][-1]) + 1)))
+        if om is None or len(om) != len(big):
+            om = np.zeros((len(big), 7), np.uint8)
+        with cmap.hold_sync():
+            cmap.cells = fr["cellid"].astype("<u8").tobytes()
+            # the 17th byte: earthwork 1..255 (0 none)
+            ew = fr.get("earth")
+            eb = (np.where(np.isnan(ew), 0, 1 + np.round(254 * np.nan_to_num(ew))).astype(np.uint8)
+                  if ew is not None and len(ew) == len(big) else np.zeros(len(big), np.uint8))
+            cmap.hattrs = np.ascontiguousarray(np.column_stack([np.stack([yc, lb, tc, ts, ch, sb, fr["kind"].astype(np.uint8), lc, bt], 1), om, eb])).tobytes()
+            cmap.hmeta = json.dumps({
+                "y0": int(fr["years"][0]), "y1": int(fr["years"][-1]), "km2": float(CELL_KM2.get(HOLD["res"], 0)),
+                "seq": int(fr.get("seq", 0)), "carry": CARRY_RES, "timing": fr.get("timing"),
+                "classes": [_WC_NAME[c] for c in WC_CODES],
+                "hist": [int(fr["hyears"][0]), int(fr["hyears"][-1])] if fr.get("hist") else None,
+                "hist_pending": bool(fr.get("hist_pending")),
+                "kinds": fr.get("kinds"), "lc_source": (fr.get("lc_model") or {}).get("source"),
+                "kinds_ready": bool(fr.get("kinds_ready")),
+                "otf": HOLD.get("otf_info"), "otf_pending": bool(HOLD.get("otf_pending")), "otf_zoom": round(ZOOM_MOSAIC, 1),
+                "otf_ver": int(STORE["ver"]),
+                "otf_classes": OTF_CLASSES, "otf_ground": OTF_GROUND,
+            })
+        HOLD["sent"] = fr
+
+    _AEF_KEEP_BYTES = 512 * 1024 ** 2
+
+    def _trim(bkey=None):
+        # the kept folds: AlphaEarth's by bytes (a year in a 2x box at zoom
+        # 12 is ~140 MB, float32), least recently used first and never the
+        # box in use; the rest by count
+        if bkey is not None:
+            for k in [k for k in HOLD["aef"] if k[1] == bkey]:
+                HOLD["aef"][k] = HOLD["aef"].pop(k)
+        size = lambda v: v[0]["V"].nbytes if v[0] is not None else 0
+        held = sum(size(v) for v in HOLD["aef"].values())
+        for k in list(HOLD["aef"]):
+            if held <= _AEF_KEEP_BYTES:
+                break
+            if k[1] != bkey:
+                held -= size(HOLD["aef"].pop(k))
+        for k_ in ("wc", "io", "ov"):
+            while len(HOLD[k_]) > 40:
+                HOLD[k_].pop(next(iter(HOLD[k_])))
+
+    def _teach(bkey):
+        # the land cover teachers read for this box (see LC_* in the constants)
+        return {"io": {y: HOLD["io"][(y, bkey)][0] for y in IO_YEARS if (y, bkey) in HOLD["io"] and HOLD["io"][(y, bkey)][0] is not None},
+                "ov": (HOLD["ov"].get(bkey) or (None, ""))[0]}
+
+    def _teach_need(bkey, years):
+        # the land cover teachers' reads (Impact Observatory, Overture): NONE in this notebook. Earthwork does
+        # not use them; they stay in on_the_fly.py. AEF Change's built ground reads from the WorldCover stand-in
+        return [], False
+
+    def _teach_start(bkey, box, fres, years):
+        """The teachers' reads for these years, started now unless already in
+        flight, each kept in HOLD when it lands. The hexagons never wait on
+        them; Kinds of change follows."""
+        fly = HOLD.setdefault("teach_fly", {})
+        ineed, oneed = _teach_need(bkey, years)
+
+        async def _one(k, coro):
+            r = await coro
+            if k[0] == "ov":
+                HOLD["ov"][bkey] = r
+            else:
+                HOLD["io"][(k[1], bkey)] = r
+            return r
+
+        futs = []
+        for k, mk in ([(("ov", bkey), lambda: ov_fold(box, fres))] if oneed else []) + [
+                (("io", y, bkey), (lambda y=y: io_fold(box, fres, y))) for y in ineed]:
+            f = fly.get(k)
+            if f is None or f.cancelled() or (f.done() and f.exception() is not None):
+                f = fly[k] = asyncio.ensure_future(_one(k, mk()))
+                f.add_done_callback(lambda f_, k=k: fly.pop(k, None) if fly.get(k) is f_ else None)
+            futs.append(f)
+        return futs
+
+    def _later(fr0, key, box, res, rres, fres, stats, hist):
+        """WHAT COMES WHEN READY: the window's frame is already on the map. In the background:
+        the land cover teachers (Impact Observatory, Overture: slow, 20 to 40 s
+        at zoom 10.5) and, zoomed in, the other AlphaEarth years. After each
+        arrives the frame is built again with everything read so far (same
+        cells, same model, same seq, so the browser recolors and keeps its
+        tiles) and replaces it if it is still the one showing. A new view
+        cancels it."""
+        y0, y1 = key[0], key[1]
+        bkey = (res, key[3])
+        seq = fr0.get("seq")
+
+        async def _teachers():
+            # the reads _serve_hex started with AlphaEarth, or new ones;
+            # shielded, so a new view cancels the wait but not the reads
+            # (the next view over this ground may share them)
+            await asyncio.gather(*map(asyncio.shield, _teach_start(bkey, box, fres, list(range(y0, y1 + 1)) + (list(IO_YEARS) if hist else []))))
+            return "land cover teachers: " + " | ".join(
+                [(HOLD["ov"].get(bkey) or (None, ""))[1]] + [HOLD["io"][(y, bkey)][1] for y in IO_YEARS if (y, bkey) in HOLD["io"]])
+
+        async def _history():
+            need = [y for y in AEF_YEARS_ALL if (y, bkey) not in HOLD["aef"]]
+            got = await asyncio.gather(*(aef_fold(box, fres, y, read_res=rres) for y in need))
+            for y, r in zip(need, got):
+                HOLD["aef"][(y, bkey)] = r
+            _trim(bkey)
+            return f"history {AEF_YEARS_ALL[0]} to {AEF_YEARS_ALL[-1]} read"
+
+        async def _rebuild(what, t0):
+            cur = HOLD["frame"]
+            if cur is None or cur.get("seq") != seq:
+                return
+            hh = hist and all((y, bkey) in HOLD["aef"] for y in AEF_YEARS_ALL)
+            ayears = AEF_YEARS_ALL if hh else range(y0, y1 + 1)
+            aef_by_year = {y: HOLD["aef"][(y, bkey)][0] for y in ayears if (y, bkey) in HOLD["aef"]}
+            wc = HOLD["wc"].get(bkey)
+            if any(y not in aef_by_year for y in range(y0, y1 + 1)) or wc is None:
+                return
+            t1 = time.time()
+            async with HOLD["build_lock"]:
+                fr = await cpu(build_frame, aef_by_year, wc[0], y0, y1, res, hh, _teach(bkey))
+            cur = HOLD["frame"]
+            if fr is None or cur is None or cur.get("seq") != seq or len(fr["cellid"]) != len(cur["cellid"]):
+                return
+            ineed, oneed = _teach_need(bkey, range(y0, y1 + 1)) if res >= KINDS_MIN_RES else ([], False)
+            fr["seq"] = seq
+            fr["hist_pending"] = hist and not fr.get("hist")
+            fr["teach_pending"] = bool(ineed or oneed)
+            fr["kinds_ready"] = res >= KINDS_MIN_RES and not fr["teach_pending"]
+            fr["timing"] = {**(fr0.get("timing") or {}), "later": 1e3 * (t1 - t0), "t_frame": time.time()}
+            HOLD["memo"][key] = (fr, stats)
+            HOLD["frame"] = fr
+            _paint()
+            HOLD["hex_status"] = HOLD["hex_ready"] = (
+                f"hexagons: {stats} | {what} in {t1 - t0:.1f} s, frame again {time.time() - t1:.1f} s | {fr['score']}"
+                + (f" | reading AlphaEarth {AEF_YEARS_ALL[0]} to {AEF_YEARS_ALL[-1]}, the whole history…" if fr["hist_pending"] else "")
+                + (" | reading Impact Observatory and Overture…" if fr["teach_pending"] else ""))
+            _say(HOLD["hex_status"])
+            if HOLD.get("card_pick"):
+                _card_send(HOLD["card_pick"])
+
+        async def _run():
+            t0 = time.time()
+            jobs = []
+            ineed, oneed = _teach_need(bkey, range(y0, y1 + 1)) if res >= KINDS_MIN_RES else ([], False)
+            if ineed or oneed:
+                jobs.append(asyncio.ensure_future(_teachers()))
+            if hist and not fr0.get("hist"):
+                jobs.append(asyncio.ensure_future(_history()))
+            try:
+                for fut in asyncio.as_completed(jobs):
+                    what = await fut
+                    await _rebuild(what, t0)
+            except asyncio.CancelledError:
+                for j in jobs:
+                    j.cancel()
+                raise
+            except Exception as exc:
+                tb = traceback.extract_tb(exc.__traceback__)
+                _say(f"reading later failed: {type(exc).__name__}: {exc}" + (f" (line {tb[-1].lineno})" if tb else ""))
+
+        HOLD["hist_task"] = (key, _spawn(_run()))
+
+    # THE MODEL, PER PIXEL, from the 10 m read (read res MOSAIC_MIN_RES, about zoom 13.2): run
+    # in the background over the view once its frame is up, into the session store (otf_run);
+    # the frame is painted again from the store when it lands. A view the store already holds
+    # (these years, this ground) is not run again. The view is capped at _OTF_KM2 around its
+    # center (a wide screen at zoom 13.2 is a few hundred km2).
+    _OTF_KM2 = 300.0
+    # the model runs from zoom 13 (the frame's own 10 m read starts a little later, at 13.2;
+    # the model reads its 10 m window itself)
+    ZOOM_MOSAIC = 13.0
+
+    def _otf_box(view):
+        W_, S_, E_, N_ = view
+        a = box_km2(view)
+        if a <= _OTF_KM2:
+            return view
+        f = (_OTF_KM2 / a) ** 0.5
+        cx, cy, hx, hy = (W_ + E_) / 2, (S_ + N_) / 2, (E_ - W_) * f / 2, (N_ - S_) * f / 2
+        return (cx - hx, cy - hy, cx + hx, cy + hy)
+
+    def _otf_start(view, years):
+        if not json.loads(cmap.config or "{}").get("models"):
+            return
+        ob = _otf_box(view)
+        if otf_covered(ob, years):
+            return
+        ot = HOLD.get("otf_task")
+        if ot is not None and ot[1] is not None and not ot[1].done():
+            b = ot[0]
+            if b[0] <= ob[0] and b[1] <= ob[1] and b[2] >= ob[2] and b[3] >= ob[3]:
+                return
+            ot[1].cancel()
+
+        async def _run():
+            HOLD["otf_pending"] = True
+            HOLD["sent"] = None
+            _paint()
+            try:
+                info = await otf_run(ob, years, say=lambda m: _say(m + (" | " + HOLD["hex_status"] if HOLD.get("hex_status") else "")))
+                if info is not None:
+                    HOLD["otf_info"] = info
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                tb = traceback.extract_tb(exc.__traceback__)
+                _say(f"the model failed: {type(exc).__name__}: {exc}" + (f" (line {tb[-1].lineno})" if tb else ""))
+            finally:
+                HOLD["otf_pending"] = False
+            HOLD["sent"] = None
+            _paint()
+            if HOLD.get("card_pick"):
+                _card_send(HOLD["card_pick"])
+            _say(HOLD.get("hex_status") or "")
+
+        HOLD["otf_task"] = (ob, _spawn(_run()))
+
+    async def _serve_hex(vsd, force=False):
+        view = view_to_bbox(vsd)
+        box = pad_box(view)
+        fr0 = HOLD["frame"]
+        if (fr0 is not None and HOLD["box"] is not None and contains(HOLD["box"], view) and not force
+                and min(15, res_for_view(vsd, box) + HEX_UP) <= HOLD["res"] and (fr0["y0"], fr0["y1"]) == (HOLD["y0"], HOLD["y1"])):
+            HOLD["hex_status"] = HOLD.get("hex_ready") or HOLD["hex_status"]
+            # the same frame, but the model may not have run on this view yet (zoomed in past 13 within it)
+            if vsd["zoom"] >= ZOOM_MOSAIC:
+                _otf_start(view, list(range(HOLD["y0"], HOLD["y1"] + 1)))
+            return
+        rres = res_for_view(vsd, box)
+        res = min(15, rres + HEX_UP)
+        fres = min(13, res + CARRY_RES)
+        y0, y1 = HOLD["y0"], HOLD["y1"]
+        rbox = tuple(round(v, 3) for v in box)
+        key = (y0, y1, res, rbox)
+        t0 = time.time()
+        # zoomed in far enough, the whole history follows once the window is up
+        hist = rres >= HIST_MIN_RES
+        ht = HOLD.get("hist_task")
+        if ht is not None and ht[0] != key and ht[1] is not None:
+            ht[1].cancel()
+        years = list(range(y0, y1 + 1))
+        _tn = _teach_need((res, rbox), years) if res >= KINDS_MIN_RES else ([], False)
+        HOLD["hex_status"] = (f"reading AlphaEarth {y0} to {y1}, ESA WorldCover"
+                              + (", Impact Observatory" if _tn[0] else "") + (", Overture" if _tn[1] else "") + "…")
+        _say(HOLD["hex_status"])
+        if key in HOLD["memo"]:
+            fr, stats = HOLD["memo"][key]
+        else:
+            bkey = (res, rbox)
+            need = [y for y in years if (y, bkey) not in HOLD["aef"]]
+            wneed = bkey not in HOLD["wc"]
+            # the land cover teachers (Impact Observatory, Overture PMTiles)
+            # start with AlphaEarth but the hexagons do not wait on them: inside one
+            # gather, Impact Observatory's reads took 13 to 19 s against 5 s
+            # alone and held the hexagons (Wuhan, zoom 12.2). Kinds of change
+            # follows when they land (_later)
+            if res >= KINDS_MIN_RES:
+                _teach_start(bkey, box, fres, years)
+            got = await asyncio.gather(
+                wc_fold(box, res) if wneed else asyncio.sleep(0, result=HOLD["wc"].get(bkey)),
+                *(aef_fold(box, fres, y, read_res=rres) for y in need),
+            )
+            if wneed:
+                HOLD["wc"][bkey] = got[0]
+            for y, r in zip(need, got[1:]):
+                HOLD["aef"][(y, bkey)] = r
+            _trim(bkey)
+            # zoomed or moved on while these were read (a fast zoom in): they
+            # are kept, but no frame is built or drawn for a view already left
+            pend = HOLD.get("pending")
+            if pend is not None and not force:
+                pv = _vsd(pend)
+                if pv["zoom"] < HEX_ZOOM or min(15, res_for_view(pv, pad_box(view_to_bbox(pv))) + HEX_UP) != res or not contains(box, view_to_bbox(pv)):
+                    return
+            wc, s_wc = HOLD["wc"][bkey]
+            aef_by_year = {y: HOLD["aef"][(y, bkey)][0] for y in years if (y, bkey) in HOLD["aef"]}
+            t1 = time.time()
+            teach = _teach(bkey)
+            async with HOLD["build_lock"]:
+                fr = await cpu(build_frame, aef_by_year, wc, y0, y1, res, False, teach)
+            if fr is not None:
+                fr["timing"] = {
+                    "reads": 1e3 * (t1 - t0), "frame": 1e3 * (time.time() - t1),
+                    "aef": [HOLD["aef"][(y, bkey)][1] for y in years if (y, bkey) in HOLD["aef"]], "wc": s_wc,
+                    "t_frame": time.time(),
+                }
+            if fr is None:
+                HOLD["hex_status"] = f"hexagons: res {res}, AlphaEarth has fewer than two years here | " + " | ".join(HOLD["aef"][(y, bkey)][1] for y in years if (y, bkey) in HOLD["aef"])
+                return
+            HOLD["fseq"] = HOLD.get("fseq", 0) + 1
+            fr["seq"] = HOLD["fseq"]
+            # each year's AlphaEarth read and fold, "c" where it came from memory
+            _rd = []
+            for y in years:
+                if (y, bkey) not in HOLD["aef"]:
+                    continue
+                m_ = re.search(r"([\d.]+) s · fold [\d,]+ ([\d.]+) s", HOLD["aef"][(y, bkey)][1] or "")
+                _rd.append(f"{y} c" if y not in need else f"{y} {m_.group(1)}+{m_.group(2)} s" if m_ else f"{y} ?")
+            stats = (
+                f"read res {rres}, hexagons res {res}, peak of res {fres} | AEF read+fold {', '.join(_rd)} "
+                f"(all {t1 - t0:.1f} s) | {s_wc} | frame {time.time() - t1:.1f} s"
+            )
+            HOLD["memo"][key] = (fr, stats)
+            while len(HOLD["memo"]) > 4:
+                HOLD["memo"].pop(next(iter(HOLD["memo"])))
+        fr["hist_pending"] = hist and not fr.get("hist")
+        # the land cover teachers only where Kinds of change is shown (KINDS_MIN_RES)
+        _in, _on_ = _teach_need((res, rbox), years) if res >= KINDS_MIN_RES else ([], False)
+        fr["teach_pending"] = bool(_in or _on_)
+        fr["kinds_ready"] = res >= KINDS_MIN_RES and not fr["teach_pending"]
+        HOLD["frame"], HOLD["box"], HOLD["res"] = fr, box, res
+        _paint()
+        HOLD["hex_status"] = HOLD["hex_ready"] = (
+            f"hexagons: {stats} | {fr['score']} | {time.time() - t0:.1f} s"
+            + (f" | reading AlphaEarth {AEF_YEARS_ALL[0]} to {AEF_YEARS_ALL[-1]}, the whole history…" if fr["hist_pending"] else "")
+            + (" | reading Impact Observatory and Overture…" if fr["teach_pending"] else ""))
+        if HOLD.get("card_pick"):
+            _card_send(HOLD["card_pick"])
+        ht = HOLD.get("hist_task")
+        if (fr["hist_pending"] or fr["teach_pending"]) and not (ht is not None and ht[0] == key and ht[1] is not None and not ht[1].done()):
+            _later(fr, key, box, res, rres, fres, stats, hist)
+        if vsd["zoom"] >= ZOOM_MOSAIC:
+            _otf_start(view, years)
+
+    # READ AHEAD: from _AHEAD_ZOOM, still short of the
+    # hexagons, AlphaEarth and WorldCover for the box zoom HEX_ZOOM would read
+    # here are read in the background. Crossing into the hexagons over the
+    # same ground then only builds the frame; nearby, the COG bytes are kept
+    # (_Kept) and the fold is quick. A new place cancels the fold, not the
+    # downloads under it.
+    _AHEAD_ZOOM = 8.3
+
+    def _ahead(vsd):
+        v9 = dict(vsd, zoom=HEX_ZOOM)
+        box = pad_box(view_to_bbox(v9))
+        rres = res_for_view(v9, box)
+        res = min(15, rres + HEX_UP)
+        fres = min(13, res + CARRY_RES)
+        y0, y1 = HOLD["y0"], HOLD["y1"]
+        bkey = (res, tuple(round(v, 3) for v in box))
+        key = (y0, y1, bkey)
+        at = HOLD.get("ahead")
+        if at is not None and at[0] == key:
+            return
+        if at is not None and not at[1].done():
+            at[1].cancel()
+        need = [y for y in range(y0, y1 + 1) if (y, bkey) not in HOLD["aef"]]
+        wneed = bkey not in HOLD["wc"]
+
+        async def _run():
+            got = await asyncio.gather(wc_fold(box, res) if wneed else asyncio.sleep(0),
+                                       *(aef_fold(box, fres, y, read_res=rres) for y in need))
+            if wneed:
+                HOLD["wc"][bkey] = got[0]
+            for y, r in zip(need, got[1:]):
+                HOLD["aef"][(y, bkey)] = r
+            _trim(bkey)
+
+        HOLD["ahead"] = (key, _spawn(_run()))
+
+    async def _serve(vs, force=False):
+        vsd = _vsd(vs)
+        if vsd["zoom"] < HEX_ZOOM:
+            # the frame stays (hidden in the browser, its tiles cached there),
+            # so zooming back in over the same ground is instant
+            HOLD["hex_status"] = f"hexagons from zoom {HEX_ZOOM:g}"
+            if vsd["zoom"] >= _AHEAD_ZOOM:
+                _ahead(vsd)
+        else:
+            await _serve_hex(vsd, force)
+        _say(HOLD["hex_status"])
+
+    async def refresh(vs, force=False, settle=True):
+        """ONE serve at a time; the latest request wins while one is in flight."""
+        if HOLD["busy"]:
+            HOLD["pending"] = vs
+            HOLD["pending_force"] = HOLD["pending_force"] or force
+            return
+        HOLD["busy"] = True
+        try:
+            while True:
+                if settle:
+                    await asyncio.sleep(SETTLE)
+                if HOLD["pending"] is not None:
+                    vs, HOLD["pending"] = HOLD["pending"], None
+                    force, HOLD["pending_force"] = HOLD["pending_force"], False
+                    settle = True
+                    continue
+                await _serve(vs, force)
+                vs = HOLD["pending"]
+                if vs is None:
+                    return
+                force, HOLD["pending"], HOLD["pending_force"] = HOLD["pending_force"], None, False
+                settle = False
+        except Exception as exc:
+            tb = traceback.extract_tb(exc.__traceback__)
+            where = f" (line {tb[-1].lineno})" if tb else ""
+            _say(f"failed: {type(exc).__name__}: {exc}{where}")
+            raise
+        finally:
+            HOLD["busy"], HOLD["pending"], HOLD["pending_force"] = False, None, False
+
+    def _request(force=False):
+        vs = HOLD["vs"] if HOLD["vs"] is not None else dict(HOME)
+        HOLD["task"] = _spawn(refresh(vs, force, settle=False))
+
+    def _on_camera(change):
+        vs = change["new"]
+        if not vs:
+            return
+        HOLD["vs"] = vs
+        HOLD["task"] = _spawn(refresh(vs))
+
+    if HOLD.get("h_cam") is not None:
+        try:
+            cmap.unobserve(HOLD["h_cam"], names="view")
+        except ValueError:
+            pass
+    cmap.observe(_on_camera, names="view")
+    HOLD["h_cam"] = _on_camera
+
+    # ---- the click: the hexagon's account, as JSON the browser lays out ----------
+    def _hex_card(p):
+        fr = HOLD["frame"]
+        cellh = p.get("cell")
+        if fr is None or not cellh:
+            return None
+        cell = np.uint64(int(cellh, 16))
+        ids = fr["cellid"]
+        i = int(np.searchsorted(ids, cell))
+        if i >= len(ids) or ids[i] != cell:
+            return {"kind": "note", "title": "That hexagon is not in the current view's frame."}
+        lv = float(fr["level"][i])
+        lc = []
+        if fr["nwc"][i] > 0:
+            sh = fr["share"][i]
+            lc = [[_WC_NAME[WC_CODES[k]], float(sh[k])] for k in np.argsort(-sh) if sh[k] >= 0.01][:5]
+        return {
+            "kind": "hex", "cell": cellh, "level": None if np.isnan(lv) else lv, "big": int(fr["big"][i]),
+            "stand": None if np.isnan(fr["stand"][i]) else float(fr["stand"][i]),
+            "kind_n": int(fr["kind"][i]), "kinds": fr.get("kinds"),
+            "y0": int(fr["years"][0]), "y1": int(fr["years"][-1]),
+            "steps": [None if np.isnan(v) else float(v) for v in fr["steps"][:, i]],
+            "rel": [None if np.isnan(v) else float(v) for v in fr["rel"][:, i]],
+            "step_years": [int(b) for _, b in fr["step_years"]],
+            "landcover": lc, "km2": float(CELL_KM2.get(HOLD["res"], 0)),
+            "reads": [[int(y), fr["lc_model"]["short"][t] if t >= 0 else None] for y, t in zip(fr["lyears"], fr["lcy"][i])] if fr["lc_model"]["classes"] else [],
+            "lc_classes": fr["lc_model"]["classes"], "lc_source": fr["lc_model"]["source"],
+            "otf": otf_card(cellh, HOLD["res"], list(range(int(fr["years"][0]), int(fr["years"][-1]) + 1))),
+            "otf_classes": OTF_CLASSES, "otf_ground": OTF_GROUND, "wsf_words": [wsf_label(k) for k in range(21)],
+            **({
+                "hist": [int(fr["hyears"][0]), int(fr["hyears"][-1])],
+                "ccode": int(fr["ccode"][i]),
+                "cratio": None if np.isnan(fr["cratio"][i]) else float(fr["cratio"][i]),
+                "steps": [None if np.isnan(v) else float(v) for v in fr["hsteps"][:, i]],
+                "rel": [None if np.isnan(v) else float(v) for v in fr["hrel"][:, i]],
+                "step_years": [int(b) for _, b in fr["hstep_years"]],
+                "hbig": int(fr["hbig"][i]),
+            } if fr.get("hist") else {}),
+        }
+
+    def _card_send(p):
+        card = _hex_card(p)
+        if not card:
+            HOLD["card"], HOLD["card_pick"] = None, None
+            cmap.card = ""
+            return
+        adm = p.get("admin") or {}
+        got = HOLD.get("place") or {}
+        card["place"] = got["levels"] if got.get("n") == p.get("n") else [{"name": x} for x in (adm.get("locality"), adm.get("county"), adm.get("region")) if x]
+        card["n"] = p.get("n")
+        HOLD["card"], HOLD["card_pick"] = card, p
+        cmap.card = json.dumps(card)
+
+    def _place_later(p):
+        """The whole ladder of divisions under the click, from GeoParquet;
+        the card is resent with it if the click is still the latest."""
+        n = p.get("n")
+
+        async def _later():
+            try:
+                d = await asyncio.to_thread(division_at, p["lon"], p["lat"])
+            except Exception:
+                return
+            if HOLD.get("pick_n") != n or not d:
+                return
+            levels = []
+            for lv in d:
+                nm = lv.get("name_en") or lv.get("name")
+                if not nm:
+                    continue
+                lt = lv.get("local_type")
+                levels.append({"name": nm, "tag": lt if lt and lt != lv["subtype"] else lv["subtype"]})
+            HOLD["place"] = {"n": n, "levels": levels}
+            if HOLD.get("card_pick") is p:
+                _card_send(p)
+
+        _spawn(_later())
+
+    def _on_pick(change):
+        try:
+            p = json.loads(change["new"] or "{}")
+        except Exception:
+            return
+        try:
+            HOLD["pick_n"] = p.get("n")
+            if p.get("close"):
+                HOLD["card"], HOLD["card_pick"] = None, None
+                cmap.card = ""
+                return
+            _card_send(p)
+            if HOLD.get("card") and p.get("lon") is not None:
+                _place_later(p)
+        except Exception as e:
+            cmap.card = json.dumps({"kind": "note", "title": f"click: {type(e).__name__}: {e}"})
+
+
+    if HOLD.get("h_pick") is not None:
+        try:
+            cmap.unobserve(HOLD["h_pick"], names="pick")
+        except ValueError:
+            pass
+    cmap.observe(_on_pick, names="pick")
+    HOLD["h_pick"] = _on_pick
+
+    # ---- the controls -----------------------------------------------------------------
+    def _on_ctl_body(change):
+        try:
+            c = json.loads(change["new"] or "{}")
+        except Exception:
+            return
+        act = c.get("act")
+        if act == "s2scale":
+            try:
+                v = float(min(3.0, max(0.2, float(c.get("s2scale", HOLD["s2scale"])))))
+            except (TypeError, ValueError):
+                return
+            if s2_set_scale(v):
+                HOLD["s2scale"] = v
+                HOLD["s2gen"] += 1
+                _cfg(s2_scale=v, s2_gen=HOLD["s2gen"])
+            return
+        if act == "s2comp":
+            # the imagery colors, stretched for the view in the browser now
+            try:
+                box = view_to_bbox(_vsd(HOLD["vs"]))
+            except Exception:
+                box = HOLD.get("box")
+            if s2_set_composite(str(c.get("comp", "tci")), box):
+                HOLD["s2gen"] += 1
+                _cfg(s2_gen=HOLD["s2gen"], s2_comp=str(c.get("comp", "tci")))
+            return
+        if act == "aef":
+            a, b = int(c.get("y0", HOLD["y0"])), int(c.get("y1", HOLD["y1"]))
+            if a in AEF_YEARS_ALL and b in AEF_YEARS_ALL and a < b and (a, b) != (HOLD["y0"], HOLD["y1"]):
+                HOLD["y0"], HOLD["y1"] = a, b
+                _cfg(aef_from=a, aef_to=b)
+                _request(force=True)
+            return
+
+    def _on_ctl(change):
+        try:
+            _on_ctl_body(change)
+        except Exception as e:
+            tb = traceback.extract_tb(e.__traceback__)
+            where = f" (line {tb[-1].lineno})" if tb else ""
+            _say(f"control failed: {type(e).__name__}: {e}{where}")
+
+    if HOLD.get("h_ctl") is not None:
+        try:
+            cmap.unobserve(HOLD["h_ctl"], names="ctl")
+        except ValueError:
+            pass
+    cmap.observe(_on_ctl, names="ctl")
+    HOLD["h_ctl"] = _on_ctl
+
+    # the first fold waits for the browser's own view (its real size); a
+    # re-run of this cell with a view already known serves it again
+    if HOLD["frame"] is None and not HOLD["busy"]:
+        if HOLD["vs"] is not None:
+            _request()
+    else:
+        HOLD["sent"] = None
+        _paint()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Under the map
+
+    Press the button once the map has settled to query the current view's
+    hexagons with DuckDB, one row per hexagon, most moved first. Each row's
+    numbers are its most-changed finer cell's: `disp` (1 minus the cosine
+    between the first and last year read), `level` (the same, stretched to
+    this view's p2 to p98), `kind` (its kind of change, 0 in none),
+    `big_year` (the year whose step stands out most against that year's
+    median step in view, -2 no data), `stands_out` (that step over the
+    median), `finer_cells` (how many finer cells the hexagon holds),
+    `change_history` (zoomed in: held, came back, changes most years, kept
+    moving, too recent), one `step_YYYY` and one `rel_YYYY` (the step over
+    the year's median) per step, one `reads_as_YYYY` per year (the land
+    cover AlphaEarth reads it as), `landcover` and `landcover_share` (the
+    main ESA WorldCover 2021 class) and one `wc_` column per WorldCover
+    class.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    tables_btn = mo.ui.run_button(label="table for the current view")
+    tables_btn
+    return (tables_btn,)
+
+
+@app.cell
+def _(HOLD, con, mo, tables_btn):
+    mo.stop(not tables_btn.value or HOLD["frame"] is None, mo.md("*no hexagons yet (zoom in past 9)*") if tables_btn.value else None)
+    con.register("view_cells", HOLD["frame"]["cells"])
+    view_table = mo.sql(
+        """
+        SELECT * FROM view_cells ORDER BY disp DESC NULLS LAST
+        """,
+        engine=con,
+    )
+    return
+
+
+if __name__ == "__main__":
+    app.run()
