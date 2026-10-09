@@ -1580,9 +1580,12 @@ def _(anywidget, asyncio, time, traitlets):
         /* folded while the imagery shows: the size of the folded hint card (its padding, 120 px of text and
            the arrow), the year over its colors */
         .at-yc.collapsed.holding{width:auto}
-        .at-yc.collapsed .yr.img{grid-template-columns:auto auto;column-gap:16px;align-items:center}
-        .at-yc.collapsed .yr.img b{grid-column:1;grid-row:1;font-size:28px;line-height:1}
-        .at-yc.collapsed .yr.img .comp{grid-column:1;grid-row:2;padding:4px 0 0;font-weight:400}
+        .at-yc.bare{width:auto}
+        .at-yc.bare .yr span{max-width:120px}
+        .at-yc.bare>p{max-width:152px}
+        .at-yc.collapsed .yr.img{grid-template-columns:120px auto;column-gap:12px;align-items:center}
+        .at-yc.collapsed .yr.img b{grid-column:1;grid-row:1;font-size:42px;line-height:.86}
+        .at-yc.collapsed .yr.img .comp{grid-column:1;grid-row:2;padding:2px 0 0;font-weight:400}
         .at-yc.collapsed .yr.img .at-cb{grid-column:2;grid-row:1/3;align-self:center;margin-top:0}
         .at-yc h4{margin:14px 0 2px;font-size:13.5px;font-weight:600}
         .at-yc .sub{color:var(--muted);font-size:12.5px;margin:0 0 6px}
@@ -2286,6 +2289,8 @@ def _(anywidget, asyncio, time, traitlets):
             yc.innerHTML = h;
             fc.style.display = "none";
             yc.classList.toggle("collapsed", ycFolded);
+            // only the hint in it (no hexagon picked, no imagery held): as small open as folded
+            yc.classList.toggle("bare", !pc && !st.holding);
             const cb = yc.querySelector(".yr .at-cb");
             if (cb) cb.onclick = (e) => { e.stopPropagation(); ycFolded = !ycFolded; keep("card", ycFolded); renderYear(); };
             const hx = yc.querySelector(".hexwrap .x");
