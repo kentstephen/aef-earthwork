@@ -1,4 +1,4 @@
-# aef-elevation
+# aef-earthwork
 
 AlphaEarth Foundations (AEF) annual embeddings draped over elevation, to see how river
 corridors and watersheds change over time.

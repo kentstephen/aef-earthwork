@@ -1,5 +1,5 @@
 [project]
-name = "aef-elevation"
+name = "aef-earthwork"
 version = "0.1.0"
 description = "AlphaEarth embeddings draped over elevation: how river corridors and watersheds change over time."
 readme = "README.md"
