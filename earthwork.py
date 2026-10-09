@@ -1305,13 +1305,15 @@ def _(change_resolution, np, os, pa):
     # 50% to 4% lit, the Sahara from 51% to 2%
     GATE_LO, GATE_HI = 0.05, 0.15
 
-    # THE AREA SCALE (A on the map) reads the same score as a log, floored here: in places unlike the US sites
-    # the model learned from (Bujumbura) every chance rounds to 0%, yet its log still ranks the ground
-    LOG_FLOOR = -30.0
+    # THE AREA SCALE (A on the map) reads the same score as log-odds, log(p / (1 - p)), clipped to LOGIT_LO..HI:
+    # in places unlike the US sites the model learned from (Bujumbura) every chance rounds to 0%, yet its
+    # log-odds still rank the ground; and unlike a plain log they keep the top apart too (zoomed out most
+    # hexagons carry a high peak, and a log puts everything from 50% to 100% within 0.7 of 0)
+    LOGIT_LO, LOGIT_HI = -30.0, 15.0
 
     def _earthwork(Vf, Vl, chunk=200_000):
         """The chance the ground moved, per row of Vf (first year) and Vl (last year), gated by how far AlphaEarth
-        moved, and its natural log (LOG_FLOOR at the least); NaN where either is missing."""
+        moved, and its log-odds (clipped to LOGIT_LO..HI); NaN where either is missing."""
         out = np.full(len(Vf), np.nan, np.float32)
         logs = np.full(len(Vf), np.nan, np.float32)
         for i in range(0, len(Vf), chunk):
@@ -1322,10 +1324,12 @@ def _(change_resolution, np, os, pa):
             z = np.c_[b, a, a * b, (a - b) ** 2] @ EW_W + EW_B
             gate = np.clip(((1.0 - (a * b).sum(1)) - GATE_LO) / (GATE_HI - GATE_LO), 0, 1)
             out[i:i + chunk] = np.where(ok, gate / (1 + np.exp(-z)), np.nan)
-            # log(gate) - log(1 + e^-z), without the overflow of exp(-z) far below the bar
+            # log p = log(gate) - log(1 + e^-z), without the overflow of exp(-z) far below the bar; log(1 - p)
+            # in float64 (p runs to within 1e-12 of 1)
             with np.errstate(divide="ignore"):
-                lg = np.log(gate) - np.logaddexp(0, -z)
-            logs[i:i + chunk] = np.where(ok, np.maximum(lg, LOG_FLOOR), np.nan)
+                lp = np.log(gate.astype(np.float64)) - np.logaddexp(0, -z.astype(np.float64))
+                lq = np.log1p(-np.minimum(np.exp(lp), 1 - 1e-12))
+            logs[i:i + chunk] = np.where(ok, np.clip(lp - lq, LOGIT_LO, LOGIT_HI), np.nan)
         return out, logs
 
     def build_frame(aef_by_year, y0, y1, res):
@@ -1364,7 +1368,7 @@ def _(change_resolution, np, os, pa):
             "score": f"Earthwork {y0} to {y1}: {int(scored.sum()):,} of {n:,} hexagons scored, peak of {nfine:,} finer cells",
         }
 
-    return LOG_FLOOR, build_frame
+    return LOGIT_HI, LOGIT_LO, build_frame
 
 
 @app.cell
@@ -1563,6 +1567,16 @@ def _(anywidget, asyncio, time, traitlets):
         .at-yc .yr.quiet span{padding-bottom:0}
         .at-yc .yr.quiet .at-cb{margin-top:-2px;align-self:center}
         .at-yc.holding .yr span{color:var(--text)}
+        /* the imagery's year: the year and its colors on one line, the buttons and the keys under them, the
+           card narrower while it shows (no tall empty corner over the year) */
+        .at-yc.holding{width:300px}
+        .at-yc .yr.img{display:grid;grid-template-columns:auto 1fr auto;column-gap:10px;align-items:end}
+        .at-yc .yr.img b{font-size:44px}
+        .at-yc .yr.img .comp{margin:0;padding-bottom:3px}
+        .at-yc .yr.img .at-cb{align-self:start;margin-top:-4px}
+        .at-yc .yr.img .comps{grid-column:1/-1;margin:10px 0 6px}
+        .at-yc .yr.img .help{grid-column:1/-1;padding:0}
+        .at-yc.collapsed .yr.img .comps,.at-yc.collapsed .yr.img .help{display:none}
         .at-yc h4{margin:14px 0 2px;font-size:13.5px;font-weight:600}
         .at-yc .sub{color:var(--muted);font-size:12.5px;margin:0 0 6px}
         .at-yc .hex{border-top:1px solid var(--line);margin-top:12px;padding-top:12px;position:relative}
@@ -1722,7 +1736,7 @@ def _(anywidget, asyncio, time, traitlets):
           const A_FILL = cfg.alpha_fill || 235, A_QUIET = cfg.alpha_quiet || 70, A_DIM = 45;
           const HEXZ = cfg.hex_zoom || 9, HOLD_MS = cfg.hold_ms || 200, SLOP = cfg.hold_slop || 5;
           const st = {
-            gmode: "earth", want: "earth", area: false, hideKinds: new Set(), focus: "all", y0: cfg.aef_from || 2022, y1: cfg.aef_to || 2025,
+            gmode: "earth", want: "earth", area: false, noPick: false, hideKinds: new Set(), focus: "all", y0: cfg.aef_from || 2022, y1: cfg.aef_to || 2025,
             imgYear: cfg.s2_year || S2Y[S2Y.length - 1], labels: true, s2scale: Number(cfg.s2_scale) || 1, s2comp: cfg.s2_comp || "tci",
             fit: !!cfg.fit, holding: false,
             // the pair (P) and its left side (Sentinel-2)
@@ -1948,7 +1962,7 @@ def _(anywidget, asyncio, time, traitlets):
             <p><b>Earthwork</b> (E) is the chance the ground itself was dug, filled or graded between the first and last year read: a model on AlphaEarth taught where 3DEP lidar flew the same ground twice. Each hexagon shows its highest-scoring finer cell, so a single dig stands out. Pair (P) with Sentinel-2 to see what it is.</p>
             <p>Earthwork is drawn in H3 hexagons from zoom ${HEXZ}. <b>Click</b> a hexagon for its account.</p>
             <p><b>Hold space</b> to see the Sentinel-2 yearly imagery (Earth Genome, 2022 to 2025) instead of the hexagons; scroll while holding to step through the years.</p>
-            <p><small>Keys: hold space for the imagery, scroll or [ and ] for its year, B its first year or its latest; P pairs the map with Sentinel-2; A the area scale (unusual for this area) and back; F full screen; ; and ' its brightness; - = and _ + the years read; L place names; / search (a place, or paste an H3 string); X fill the window; Esc close.</small></p>
+            <p><small>Keys: hold space for the imagery, scroll or [ and ] for its year, B its first year or its latest; P pairs the map with Sentinel-2; A the area scale (unusual for this area) and back; Q the tooltip and picking off and on; Shift + arrows turn and tilt the map; F full screen; ; and ' its brightness; - = and _ + the years read; L place names; / search (a place, or paste an H3 string); X fill the window; Esc close.</small></p>
             <p><small>AlphaEarth Foundations by Google and Google DeepMind (CC BY 4.0). ESA WorldCover 10 m 2021 v200, contains modified Copernicus Sentinel data processed by the ESA WorldCover consortium (CC BY 4.0). Impact Observatory, Microsoft and Esri 10 m annual land use and land cover v02, via Microsoft Planetary Computer (CC BY 4.0). Overture Maps transportation and land use, &copy;&nbsp;OpenStreetMap contributors (ODbL), from Overture's PMTiles. Sentinel-2 mosaics by Earth Genome (CC BY 4.0). Place names from Overture Maps divisions, &copy;&nbsp;OpenStreetMap contributors, Overture Maps Foundation (ODbL), with geoBoundaries, Esri Community Maps contributors and LINZ (CC BY 4.0): the PMTiles and, via Source Cooperative, fused/overture. Search by Photon over OpenStreetMap (ODbL). Basemap by Carto.</small></p>
             <div style="margin-top:12px"><button class="at-chip">Close</button></div></div>`;
           pane.appendChild(about);
@@ -2009,9 +2023,9 @@ def _(anywidget, asyncio, time, traitlets):
           // ---- the hexagons -----------------------------------------------------------
           let areaSt = null;  // the area scale's numbers for the frame (areaStats)
           let hexes = [], N = 0, res = -1, hexIndex = new Map(), hattrs = null, hmeta = {}, hcol = null, hcol32 = null, hexSeq = 0, hover = null, picked = null, imgPick = null;
-          // THE AREA SCALE (A): each hexagon's Earthwork log (3rd byte, -30..0 as 1..255) against the rest of
-          // the frame's hexagons, stretched from their median (no ink) to their top 0.1% (full ink); in a log so
-          // places the model scores ~0% everywhere still rank. topGlobal: the normal scale's value at that top
+          // THE AREA SCALE (A): each hexagon's Earthwork log-odds (3rd byte, -30..15 as 1..255) against the rest of
+          // the frame's hexagons, stretched from their median (no ink) to their top 0.1% (full ink); in log-odds
+          // so places the model scores ~0% everywhere still rank, and the top stays apart. topGlobal: the normal scale's value at that top
           function areaStats() {
             const hl = new Uint32Array(256), he = new Uint32Array(256);
             let n = 0;
@@ -2076,7 +2090,8 @@ def _(anywidget, asyncio, time, traitlets):
             }
             hexSeq++;
           }
-          const hexAt = (ll) => { if (res < 0 || !map || map.getZoom() < HEXZ) return -1; try { const h = latLngToCell(ll.lat, ll.lng, res); const i = hexIndex.get(h); return i == null || (st.gmode === "much" && hattrs && !hattrs[HB * i + 8]) ? -1 : i; } catch (e) { return -1; } };
+          // Q: no tooltip, no hover outline and no picking, so the map can be looked at (or shot) clean
+          const hexAt = (ll) => { if (st.noPick || res < 0 || !map || map.getZoom() < HEXZ) return -1; try { const h = latLngToCell(ll.lat, ll.lng, res); const i = hexIndex.get(h); return i == null || (st.gmode === "much" && hattrs && !hattrs[HB * i + 8]) ? -1 : i; } catch (e) { return -1; } };
           function hexWords(i) {
             const o = HB * i, yb = hattrs[o], lv = hattrs[o + 1];
             if (!lv) return "No AlphaEarth data here.";
@@ -2240,7 +2255,7 @@ def _(anywidget, asyncio, time, traitlets):
             // the imagery year only while the imagery shows; otherwise the hint
             const cbH = `<button class="at-cb" title="${ycFolded ? "show the card" : "fold the card"}">${ICON.chev}</button>`;
             let h = st.holding
-              ? `<div class="yr"><b>${st.imgYear}</b><span><span class="comp">${COMP_NAME[st.s2comp] || ""}</span><span class="comps">${COMPS.map(([k, l, t]) => `<button data-comp="${k}" class="${k === st.s2comp ? "on" : ""}" title="${esc(t)}">${l}</button>`).join("")}</span>Scroll or <kbd>[</kbd> <kbd>]</kbd> for another year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> for colors, <kbd>F</kbd> for full screen. Let go to see the hexagons.</span>${cbH}</div>`
+              ? `<div class="yr img"><b>${st.imgYear}</b><span class="comp">${COMP_NAME[st.s2comp] || ""}</span>${cbH}<span class="comps">${COMPS.map(([k, l, t]) => `<button data-comp="${k}" class="${k === st.s2comp ? "on" : ""}" title="${esc(t)}">${l}</button>`).join("")}</span><span class="help">Scroll or <kbd>[</kbd> <kbd>]</kbd> for another year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> for colors, <kbd>F</kbd> for full screen. Let go to see the hexagons.</span></div>`
               : st.pair
               ? `<div class="yr quiet"><span><kbd>P</kbd> back to one map</span>${cbH}</div>`
               : `<div class="yr quiet"><span>Hold space for the Sentinel-2 imagery; <kbd>P</kbd> pairs it with the map</span>${cbH}</div>`;
@@ -2628,13 +2643,19 @@ def _(anywidget, asyncio, time, traitlets):
           // through finer ones
           const HEX_SWAP_MS = 8000;
           let shownSeq = 0, swapT = null, swapFor = 0;
+          let repaintQ = false;
+          const repaintSoon = () => { if (repaintQ) return; repaintQ = true; requestAnimationFrame(() => { repaintQ = false; for (const m of [map, map2]) if (m) m.triggerRepaint(); }); };
           const showFrame = (seq) => { if (seq !== hmeta.seq || seq === shownSeq) return; clearTimeout(swapT); swapT = null; swapFor = 0; shownSeq = seq; update(); };
           const hexLayer = (visible, seq, onViewportLoad) => new TileLayer({
             id: "hexes-" + seq, visible, onViewportLoad,
             getTileData: async ({index, signal}) => {
               const u8 = await ask("hex", seq, index, signal);
-              if (!u8) return null;
+              // deck draws inside MapLibre's frames (interleaved): a tile that lands while the map is still
+              // asks for no frame, so nothing showed it (and the next frame never swapped in) until a move.
+              // Asked once the tile is decoded, so the frame finds it in place
+              if (!u8) { repaintSoon(); return null; }
               const t0 = performance.now(), ids = await unz(u8);
+              repaintSoon();
               return {ids, seq, side: Math.round(Math.sqrt(ids.length)), z: index.z, x: index.x, y: index.y, unz: performance.now() - t0, done: Date.now()};
             },
             onTileError: (e) => { if (!e || (e.name !== "AbortError" && !/stale/.test(e.message || ""))) say("hexagon tile: " + ((e && e.message) || e)); },
@@ -2812,7 +2833,7 @@ def _(anywidget, asyncio, time, traitlets):
             // the two sides are the same size under one camera, so a point is the same place on both
             map2.on("mousemove", (e) => { const i = hexAt(e.lngLat); if (i !== hover) { hover = i; update(); } });
             map2.on("mouseout", () => { if (hover != null && hover >= 0) { hover = null; update(); } });
-            map2.on("click", (e) => { const i = hexAt(e.lngLat); pickCell(i >= 0 ? hexes[i] : null, e.lngLat, e.point, st.left === "s2"); });
+            map2.on("click", (e) => { if (st.noPick) return; const i = hexAt(e.lngLat); pickCell(i >= 0 ? hexes[i] : null, e.lngLat, e.point, st.left === "s2"); });
             new ResizeObserver(() => { try { map2.resize(); } catch (e) {} }).observe(mapEl2);
           }
           function setPair(on) {
@@ -3006,10 +3027,19 @@ def _(anywidget, asyncio, time, traitlets):
             if (tgt && /^(INPUT|SELECT|TEXTAREA)$/.test(tgt.tagName)) return;
             const k = e.key, lo = st.y0, hi = st.y1;
             if (k === " ") { if (!e.repeat) spaceDown(); }
+            // Shift + arrows: turn the map (left, right: 15 degrees) and tilt it (up, down: 10), as MapLibre's own
+            // keys do; held, it keeps going
+            else if (e.shiftKey && /^Arrow(Left|Right|Up|Down)$/.test(k)) {
+              if (!map) return;
+              const db = k === "ArrowLeft" ? -15 : k === "ArrowRight" ? 15 : 0, dp = k === "ArrowUp" ? 10 : k === "ArrowDown" ? -10 : 0;
+              map.easeTo({bearing: map.getBearing() + db, pitch: Math.max(0, Math.min(map.getMaxPitch(), map.getPitch() + dp)), duration: e.repeat ? 120 : 250});
+            }
             // Color by: E Earthwork; R and Y only with the models on
             else if (/^[eE]$/.test(k) || (cfg.models && /^[rRyY]$/.test(k))) { const w = {e: "earth", r: "struct", y: "first"}[k.toLowerCase()]; st.want = w; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); }
-            // the kinds key's All (Q) / Built (W)
-            else if (/^[qQwW]$/.test(k)) { if (st.gmode !== "kinds") return; st.focus = (k === "q" || k === "Q") ? "all" : "built"; recolorHex(); styleKey(); update(); }
+            // Q: the tooltip and picking off and back on
+            else if (k === "q" || k === "Q") { st.noPick = !st.noPick; tip.style.display = "none"; hover = null; update(); note(st.noPick ? "No tooltip or picking (Q to turn them back on)" : "Tooltip and picking on", 2500); }
+            // the kinds key's Built (W)
+            else if (k === "w" || k === "W") { if (st.gmode !== "kinds") return; st.focus = "built"; recolorHex(); styleKey(); update(); }
             else if (k === "p" || k === "P") setPair(!st.pair);
             // A: the area scale and back (Earthwork only)
             else if (k === "a" || k === "A") { if (st.gmode !== "earth") return; st.area = !st.area; recolorHex(); styleKey(); update(); note(st.area ? "Area scale: unusual for this area (A for the normal scale)" : "Normal scale", 2500); }
@@ -3093,6 +3123,7 @@ def _(anywidget, asyncio, time, traitlets):
             map.on("mouseout", () => { tip.style.display = "none"; if (hover != null && hover >= 0) { hover = null; update(); } });
             map.on("click", (e) => {
               if (suppressClick) { suppressClick = false; return; }
+              if (st.noPick) return;
               const i = hexAt(e.lngLat);
               pickCell(i >= 0 ? hexes[i] : null, e.lngLat, e.point, st.holding);
             });
@@ -3223,7 +3254,7 @@ def _(
         "s2_gpu": True,
     }))
     HOLD = {
-        "frame": None, "sent": None, "box": None, "res": None, "vs": None,
+        "frame": None, "frames": {}, "sent": None, "box": None, "res": None, "vs": None,
         "busy": False, "pending": None, "pending_force": False, "task": None, "loop": None,
         "s2scale": S2_SCALE0, "s2gen": 0, "y0": AEF_FROM0, "y1": AEF_TO0,
         "hit": None, "pick_n": None, "card": None, "memo": {}, "aef": {},
@@ -3239,7 +3270,8 @@ def _(
     CARRY_RES,
     CELL_KM2,
     HEX_TILE_PX,
-    LOG_FLOOR,
+    LOGIT_HI,
+    LOGIT_LO,
     HEX_UP,
     HEX_ZOOM,
     HOLD,
@@ -3299,8 +3331,8 @@ def _(
     async def _tile_fn(src, z, x, y, year):
         t0 = time.time()
         if src == "hex":
-            fr = HOLD["frame"]
-            if fr is None or fr.get("seq") != year:
+            fr = HOLD["frames"].get(year)
+            if fr is None:
                 raise RuntimeError("stale hexagon frame")
             ts = {}
 
@@ -3360,7 +3392,7 @@ def _(
     # ---- the hexagons -------------------------------------------------------------
     def _paint():
         """Send the frame once: 17 bytes per hexagon, the layout the browser reads. Only three are used
-        here: the 2nd (AlphaEarth here: nonzero), the 3rd (Earthwork's log for the area scale, LOG_FLOOR..0
+        here: the 2nd (AlphaEarth here: nonzero), the 3rd (Earthwork's log-odds for the area scale, LOGIT_LO..HI
         as 1..255, 0 none) and the 17th (Earthwork 1..255, 0 none); the 9th is 1 (drawn). Colored in the
         browser."""
         fr = HOLD["frame"]
@@ -3368,7 +3400,7 @@ def _(
             return
         ew, el = fr["earth"], fr["elog"]
         eb = np.where(np.isnan(ew), 0, 1 + np.round(254 * np.nan_to_num(ew))).astype(np.uint8)
-        lb = np.where(np.isnan(el), 0, 1 + np.round(254 * np.clip(1 - np.nan_to_num(el) / LOG_FLOOR, 0, 1))).astype(np.uint8)
+        lb = np.where(np.isnan(el), 0, 1 + np.round(254 * np.clip((np.nan_to_num(el) - LOGIT_LO) / (LOGIT_HI - LOGIT_LO), 0, 1))).astype(np.uint8)
         at = np.zeros((len(ew), 17), np.uint8)
         at[:, 1], at[:, 2], at[:, 8], at[:, 16] = eb, lb, 1, eb
         with cmap.hold_sync():
@@ -3443,6 +3475,11 @@ def _(
                             "aef": [HOLD["aef"][(y, bkey)][1] for y in years if (y, bkey) in HOLD["aef"]], "t_frame": time.time()}
             HOLD["fseq"] = HOLD.get("fseq", 0) + 1
             fr["seq"] = HOLD["fseq"]
+            # the last few frames stay servable: the browser keeps the one on screen while the next loads
+            # behind it, and its tiles (a pan's new edge) must not fail as stale in that time
+            HOLD["frames"][fr["seq"]] = fr
+            for _old in sorted(HOLD["frames"])[:-3]:
+                del HOLD["frames"][_old]
             # each year's AlphaEarth read and fold, "c" where it came from memory
             _rd = []
             for y in years:
