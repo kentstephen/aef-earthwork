@@ -32,18 +32,20 @@
 Earthwork (E, the opening mode) is the chance that the ground was physically dug, filled or graded
 between the first and last year read (2023 and 2025 to start, close to the Sentinel-2 imagery's
 2022 to 2025; the years slider reaches back to 2017), not that its surface looked different. The model is earthwork_model.py's: a logistic regression on AlphaEarth's two years, taught
-where 3DEP lidar flew the same ground twice since 2017 (New Albany OH, Katy TX, Lakewood Ranch FL,
-Huntsville AL), the difference of the two 1 m DEMs being the truth of where earth moved more than
-half a meter. Scored on sites it never saw, it found earthwork far better than plain AlphaEarth change
-where much else changed (Huntsville: 64% of its top 5% moved, plain change 6.5%). It finds digs from
-about half a hectare well and most house-pad-sized ones not at all (10 m pixels). The DEM teaches;
-nothing on the map reads it.
+where 3DEP lidar flew the same ground twice since 2017 (eight building sites and three mines), the
+difference of the two 1 m DEMs being the truth of where earth moved more than half a meter, and taught
+by two wildfire burns what is NOT digging (a burn scar otherwise reads as earthwork). Scored on sites
+it never saw, it finds site grading far better than plain AlphaEarth change where much else changed
+(Huntsville AP .55, plain change .09); at mines it does no better than plain change. It finds digs
+from about half a hectare well and most house-pad-sized ones not at all (10 m pixels). The DEM
+teaches; nothing on the map reads it.
 
 Each finer cell of the fold is scored, and each hexagon takes its highest-scoring finer cell (the
 frame's carry-the-peak), so one dig is not averaged away by the quiet ground around it. Viridis by
 the score, on all ground. P pairs the map with Earth Genome's Sentinel-2 on the left to see what each
-hot spot is (2022 to 2025 imagery). The land cover teachers on_the_fly.py reads in the background
-(Impact Observatory, Overture) are not read here; AEF Change's built ground comes from WorldCover.
+hot spot is (2022 to 2025 imagery). Every layer drawn comes from the embeddings: Earthwork and AEF
+Change. on_the_fly.py's other layers (Overture, WSF) and its background land cover teachers (Impact
+Observatory, Overture) are left out here; AEF Change's built ground comes from WorldCover.
 
 What follows is on_the_fly.py's own account (embeddings-on-the-fly), from which this is copied.
 
@@ -90,17 +92,12 @@ Satellite Embedding dataset is produced by Google and Google DeepMind"
 2021 v200 (c) ESA WorldCover project, contains modified Copernicus Sentinel
 data (2021) processed by the ESA WorldCover consortium (CC BY 4.0).
 Impact Observatory, Microsoft and Esri 10 m annual land use and land cover
-v02, via Microsoft Planetary Computer (CC BY 4.0). Overture Maps
-transportation and land use, (c) OpenStreetMap contributors (ODbL), from
-Overture's PMTiles (release 2026-08-19.0).
+v02, via Microsoft Planetary Computer (CC BY 4.0).
 Sentinel-2 yearly mosaics by Earth Genome (CC BY 4.0). Photon (komoot) over
 OpenStreetMap data (ODbL). Place names from Overture Maps divisions:
 (c) OpenStreetMap contributors, Overture Maps Foundation (ODbL), with
 geoBoundaries, Esri Community Maps contributors and LINZ (CC BY 4.0).
-WSF Tracker (c) DLR and MindEarth, via Source Cooperative (mindearth/wsf,
-DOI 10.5281/zenodo.20424537). Overture Maps buildings, transportation and
-base, from Overture's PMTiles (ODbL; buildings also credit Microsoft,
-Google and Esri Community Maps). Basemap by Carto.
+Basemap by Carto.
 """
 
 import marimo
@@ -220,11 +217,9 @@ def _(mo):
     of embeddings-built-up run live on the view.</small>
 
     **What you are looking at.** One layer at a time, picked in Color by:
-    AEF Change (`A`), Overture (`O`) or WSF (`W`). The shared models below
-    are off for now (cfg `models`), and nothing runs them.
-    WSF (`W`) works at every zoom, out to continents: settlement by the year
-    each 10 m pixel first read built, 2016 to the end of the years read.
-    The other modes are hexagons, from zoom 9. From zoom 13.2, where
+    Earthwork (`E`) or AEF Change (`A`), both from AlphaEarth. The shared
+    models below are off for now (cfg `models`), and nothing runs them.
+    The modes are hexagons, from zoom 9. From zoom 13.2, where
     AlphaEarth is read at 10 m, the shared models run on every pixel of the
     view in the background, and the model modes are drawn from their
     answers; before that they are empty.
@@ -247,18 +242,16 @@ def _(mo):
     zoomed in (about zoom 16), where structures start to show.
 
     **Checking it.** Click a hexagon for the model's account: its classes,
-    structure reading, ground, built share by year, WSF, the Overture
-    footprint cover, and the land cover. Hold space for the Sentinel-2
+    structure reading, ground, built share by year, and the land cover. Hold space for the Sentinel-2
     yearly imagery; scroll while holding to change its year.
 
     | Key | Does |
     | --- | --- |
+    | `E` | Earthwork: the chance the ground itself moved, in viridis |
     | `A` | AEF Change: how far the numbers moved, in viridis |
-    | `O` | Overture instead of the hexagons: land use, roads, buildings |
-    | `W` | WSF on its own, at any zoom |
     | `space` (hold) | the Sentinel-2 imagery instead of the hexagons; the map still drags |
     | `P` | the pair: Sentinel-2 on the left, the map on the right, one camera |
-    | `O`, paired | the right map: AEF Change, Overture, WSF in turn |
+    | `O`, paired | the right map: Earthwork, AEF Change in turn |
     | scroll, space held | the imagery year |
     | `[` `]` | the imagery year, back and forward |
     | `B` | the imagery's first year (2022) or its latest (2025), back and forth |
@@ -422,7 +415,7 @@ def _(os, tempfile):
     # from Overture's divisions GeoParquet as Fused partitions it on Source
     # Cooperative (7 s cold, 1 to 3 s after)
     OV_DIV_PM = "https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/2026-08-19.0/divisions.pmtiles"
-    # the Overture release the model's teachers read and the map draws (O, and the pair)
+    # the Overture release the shared models' teachers read (the models are off here)
     OV_RELEASE = "2026-09-23.1"
     ADMIN_PQ = "s3://fused/overture/2026-05-20-0/theme=divisions"
 
@@ -1372,28 +1365,27 @@ def _(
 
 
 @app.cell
-def _(Image, ObjectStore, RASTER_TILE, S3_OPTS, asyncio, cpu, io, math, np, source_coop, zarr):
-    # ---- WSF Tracker: the context at every zoom (the atlas notebook's reader) ----
+def _(ObjectStore, S3_OPTS, asyncio, math, np, source_coop, zarr):
+    # ---- WSF Tracker: a teacher of the shared models (the atlas notebook's reader) ----
     # One GeoZarr on Source Cooperative, int8 per 10 m pixel: 0 never built-up,
     # k = 1..20 the half-year it first read as built-up (1 = by 2016-07-01,
     # 2 = July to December 2016, .., 20 = July to December 2025). Levels 1..12
     # are a min pyramid: drawn, never folded. The grid is plate carree, so a
-    # lon/lat box is a window. The tiles carry the index itself in red, opaque
-    # where built-up, so the browser colors "built by year Y" for any Y
-    # without asking again.
+    # lon/lat box is a window.
     WSF_PREFIX = "mindearth/wsf/World_WSF_20160701-20260101.zarr"
     WSF_RES, WSF_X0, WSF_Y0 = 8.983152841195216e-05, -180.00001488697754, 78.0100585990529
     WSF_LEVELS = 13
     WSF_NIDX = 20
-    _store = source_coop(WSF_PREFIX, **S3_OPTS)
-    _root = zarr.open_group(ObjectStore(_store, read_only=True), mode="r")
-    _arr = {k: _root[str(k)]["wsf_tracker"] for k in range(WSF_LEVELS)}
+    # opened on first use: only the shared models (off by default) read WSF, as a teacher; nothing draws it
+    _arr = {}
     _win = {}
     _sem = asyncio.Semaphore(6)
-    _png_cache = {}
-    _rawmap = np.zeros((256, 4), np.uint8)
-    for _k in range(1, WSF_NIDX + 1):
-        _rawmap[_k] = (_k, 0, 0, 255)
+
+    def _level(k):
+        if not _arr:
+            _root = zarr.open_group(ObjectStore(source_coop(WSF_PREFIX, **S3_OPTS), read_only=True), mode="r")
+            _arr.update({j: _root[str(j)]["wsf_tracker"] for j in range(WSF_LEVELS)})
+        return _arr[k]
 
     def wsf_label(k):
         """A half-year index in words."""
@@ -1410,7 +1402,7 @@ def _(Image, ObjectStore, RASTER_TILE, S3_OPTS, asyncio, cpu, io, math, np, sour
     def _window_ix(k, box):
         W_, S_, E_, N_ = box
         px = _px(k)
-        H, W = _arr[k].shape
+        H, W = _level(k).shape
         c0, c1 = max(0, int(math.floor((W_ - WSF_X0) / px))), min(W, int(math.ceil((E_ - WSF_X0) / px)))
         r0, r1 = max(0, int(math.floor((WSF_Y0 - N_) / px))), min(H, int(math.ceil((WSF_Y0 - S_) / px)))
         return c0, c1, r0, r1, px
@@ -1434,51 +1426,6 @@ def _(Image, ObjectStore, RASTER_TILE, S3_OPTS, asyncio, cpu, io, math, np, sour
         lat = WSF_Y0 - (r0 + stride * np.arange(a.shape[0]) + 0.5) * px
         return a, lon, lat
 
-    def _wsf_png(got, k, n, y, lon0, lon1):
-        T = RASTER_TILE
-        arr, lon, lat = got
-        ys = np.pi * (1 - 2 * (y + (np.arange(T) + 0.5) / T) / n)
-        lat_c = np.degrees(np.arctan(np.sinh(ys)))
-        lon_c = lon0 + (np.arange(T) + 0.5) * (lon1 - lon0) / T
-        px = _px(k)
-        ci = np.floor((lon_c - (lon[0] - px / 2)) / px).astype(np.int64)
-        ri = np.floor(((lat[0] + px / 2) - lat_c) / px).astype(np.int64)
-        okc, okr = (ci >= 0) & (ci < arr.shape[1]), (ri >= 0) & (ri < arr.shape[0])
-        pxv = arr[np.clip(ri, 0, arr.shape[0] - 1)[:, None], np.clip(ci, 0, arr.shape[1] - 1)[None, :]]
-        pxv = np.where(okr[:, None] & okc[None, :], pxv, 0)
-        rgba = _rawmap[pxv.astype(np.uint8)]
-        if not rgba[..., 3].any():
-            return None
-        buf = io.BytesIO()
-        Image.fromarray(np.ascontiguousarray(rgba), mode="RGBA").save(buf, format="PNG")
-        return buf.getvalue()
-
-    async def wsf_tile_png(z, x, y):
-        """PNG bytes for Web Mercator tile (z, x, y), the half-year index in
-        red, or None where nothing is built. The level is the one whose pixel
-        is nearest the tile's own (in meters at the tile's latitude)."""
-        key = (z, x, y)
-        if key in _png_cache:
-            return _png_cache[key]
-        T = RASTER_TILE
-        n = 2 ** z
-        lon0, lon1 = x / n * 360 - 180, (x + 1) / n * 360 - 180
-        lat1 = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
-        lat0 = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
-        if lat1 < -60.01 or lat0 > 78.01:
-            _png_cache[key] = None
-            return None
-        m_tile = 2 * math.pi * 6378137.0 / (n * T) * math.cos(math.radians((lat0 + lat1) / 2))
-        k = max(0, min(WSF_LEVELS - 1, int(round(math.log2(max(m_tile, 10.0) / 10.0)))))
-        got = await wsf_window(k, (lon0, lat0, lon1, lat1))
-        if got is None:
-            _png_cache[key] = None
-            return None
-        _png_cache[key] = await cpu(_wsf_png, got, k, n, y, lon0, lon1)
-        if len(_png_cache) > 4000:
-            _png_cache.pop(next(iter(_png_cache)))
-        return _png_cache[key]
-
     async def wsf_on_grid(west, north, res, h, w):
         """WSF level 0 at every pixel center of a lon/lat grid (the AEF
         mosaic's), nearest: the two grids are both about 10 m. Also the native
@@ -1493,7 +1440,7 @@ def _(Image, ObjectStore, RASTER_TILE, S3_OPTS, asyncio, cpu, io, math, np, sour
         rows = np.clip(np.floor(((wt[0] + WSF_RES / 2) - lat) / WSF_RES).astype(np.int64), 0, a.shape[0] - 1)
         return a[np.ix_(rows, cols)].astype(np.uint8)
 
-    return WSF_NIDX, wsf_label, wsf_on_grid, wsf_tile_png
+    return WSF_NIDX, wsf_label, wsf_on_grid
 
 
 @app.cell
@@ -3137,7 +3084,7 @@ def _(anywidget, asyncio, time, traitlets):
         .at-map{position:absolute;inset:0}
         .at-map.holding{cursor:ns-resize}
         .at-map.holding.key{cursor:grab}
-        /* the pair (P): Sentinel-2 or Overture on the left, the map on the right, one camera */
+        /* the pair (P): Sentinel-2 on the left, the map on the right, one camera */
         .at-map2{position:absolute;top:0;bottom:0;left:0;right:50%;display:none;border-right:2px solid rgba(255,255,255,.35)}
         .at.pair .at-map{left:50%}
         .at.pair .at-map2{display:block}
@@ -3362,10 +3309,6 @@ def _(anywidget, asyncio, time, traitlets):
         const YR_STOPS = ["2c4a7c", "3f5a7a", "5d6b76", "7f8279", "a19a73", "c6b564", "f0d84c"].map((h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)));
         // the whole cividis over the window's own years (y0 dark blue, y1 yellow), one step a year
         const yrCol = (y, y0, y1) => { const n = Math.max(1, y1 - y0); let t = Math.max(0, Math.min(1, (Math.round(y) - y0) / n)) * (YR_STOPS.length - 1); const i = Math.min(YR_STOPS.length - 2, Math.floor(t)), f = t - i; return YR_STOPS[i].map((v, j) => Math.round(v + (YR_STOPS[i + 1][j] - v) * f)); };
-        // WSF keeps its own ramp from the atlas notebook: YlOrBr less its near-white end
-        const WSF_STOPS = ["fee391", "fec44f", "fe9929", "ec7014", "cc4c02", "993404", "662506"].map((h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)));
-        const wsfCol = (y) => { let t = Math.max(0, Math.min(1, (y - 2016) / 9)) * (WSF_STOPS.length - 1); const i = Math.min(WSF_STOPS.length - 2, Math.floor(t)), f = t - i; return WSF_STOPS[i].map((v, j) => Math.round(v + (WSF_STOPS[i + 1][j] - v) * f)); };
-        const wsfYear = (k) => 2016 + ((k - 1) >> 1);
         const MODEL_MODES = ["allbuilt", "struct", "first"];
         // kinds of change, largest first: Okabe-Ito, made to stay apart for
         // red-weak and other color vision; quiet ground (0) faint gray
@@ -3413,7 +3356,7 @@ def _(anywidget, asyncio, time, traitlets):
             gmode: "earth", want: "earth", hideKinds: new Set(), focus: "all", y0: cfg.aef_from || 2022, y1: cfg.aef_to || 2025,
             imgYear: cfg.s2_year || S2Y[S2Y.length - 1], labels: true, s2scale: Number(cfg.s2_scale) || 1, s2comp: cfg.s2_comp || "tci",
             fit: !!cfg.fit, holding: false,
-            // the pair (P) and its left side ("s2" or "ov")
+            // the pair (P) and its left side (Sentinel-2)
             pair: false, left: "s2",
           };
 
@@ -3474,8 +3417,6 @@ def _(anywidget, asyncio, time, traitlets):
           const styleSeg = segOf(rFill, [["earth", "Earthwork", "the chance the ground itself moved (dug, filled, graded) between the first and last year read: a model taught by 3DEP repeat lidar", "E"],
                                           /* ["kinds", "Kinds of change", "the ground that moved most, grouped by the way it moved: the same color changed the same way. Click a kind in the key to hide or show it", "A"], */
                                           ["much", "AEF Change", "how far the ground's AlphaEarth numbers moved between the first and last year read, nothing trained in between (on built ground only)", "A"],
-                                          ["ov", "Overture", "Overture in the hexagons' place: land use, roads, buildings", "O"],
-                                          ["wsf", "WSF", "the World Settlement Footprint on its own: settlement by the year each 10 m pixel first read built, at any zoom", "W"],
                                           ...(cfg.models ? [["allbuilt", "All built", "other built-up, road and building, from the shared models run on every 10 m pixel and refined in the view", ""],
                                           ["struct", "Structure reading", "the chance a structure stands on or touches the ground, from the height implicit in AlphaEarth", "R"],
                                           ["first", "First year built", "the first year read in which the model calls the hexagon built", "Y"]] : [])],
@@ -3489,7 +3430,7 @@ def _(anywidget, asyncio, time, traitlets):
           const styleSoon = () => {
             const z = map ? map.getZoom() : 0, KZ = cfg.kinds_zoom || 11.8;
             const OZ = hmeta.otf_zoom || 13, model = MODEL_MODES.includes(st.gmode);
-            const show = st.gmode !== "wsf" && st.gmode !== "ov" && st.gmode !== "earth" && z >= HEXZ && (model ? (z < OZ || hmeta.otf_pending) : !hmeta.kinds_ready);
+            const show = st.gmode !== "earth" && z >= HEXZ && (model ? (z < OZ || hmeta.otf_pending) : !hmeta.kinds_ready);
             rSoon.style.display = show ? "" : "none";
             if (!show) return;
             // what reads the ground now: zoomed out the view's land cover reader, from the 10 m read the shared models
@@ -3548,18 +3489,8 @@ def _(anywidget, asyncio, time, traitlets):
             const y0 = hmeta.y0 || st.y0, y1 = hmeta.y1 || st.y1;
             const out_ = map && map.getZoom() < HEXZ;
             // the title is what is drawn, open or folded
-            panelHd.querySelector(".t").textContent = {earth: "Earthwork", wsf: "WSF", ov: "Overture", kinds: "Kinds of change", much: "AEF Change", allbuilt: "All built", struct: "Structure reading", first: "First year built"}[st.gmode] || "AEF Change";
+            panelHd.querySelector(".t").textContent = {earth: "Earthwork", kinds: "Kinds of change", much: "AEF Change", allbuilt: "All built", struct: "Structure reading", first: "First year built"}[st.gmode] || "AEF Change";
             styleSoon();
-            if (st.gmode === "ov") {
-              const d = (c, t) => `<span><i class="at-kind-dot" style="background:${c}"></i>${t}</span>`;
-              keyEl.innerHTML = d(OV_C.bld, "buildings") + d(OV_C.road, "roads") + d("rgba(230,159,0,.7)", "construction, quarries, landfill") + d("rgba(155,165,175,.55)", "residential, industrial")
-                + `<span class="why">Overture ${esc(OV_PM.split("/").pop())} in the hexagons' place.</span>`;
-              return;
-            }
-            if (st.gmode === "wsf") {
-              keyEl.innerHTML = `<span><i class="at-kind-dot" style="background:rgb(150,158,166)"></i>by mid 2016</span> 2016 <i class="at-ramp" style="background:linear-gradient(90deg,${[2016, Math.round((2016 + y1) / 2), y1].map((y) => `rgb(${wsfCol(y).join(",")})`).join(",")})"></i> ${y1}<span class="why">World Settlement Footprint (DLR, MindEarth): each 10 m pixel by the half-year it first read as settlement, up to the last year read. Its own data, not the model.</span>`;
-              return;
-            }
             if (out_) {
               keyEl.innerHTML = `<span class="why">Zoom in to ${HEXZ} for the hexagons.</span>`;
               return;
@@ -3595,7 +3526,7 @@ def _(anywidget, asyncio, time, traitlets):
           const tools = el_("div", "at-tools");
           const bMore = el_("button", "at-btn at-glass", ICON.more); bMore.title = "settings and about";
           const bFit = el_("button", "at-btn at-glass", ICON.expand); bFit.title = "fill the window (X); full screen (F)";
-          const bPair = el_("button", "at-btn at-glass", ICON.pair); bPair.title = "pair the map with Sentinel-2 or Overture (P)";
+          const bPair = el_("button", "at-btn at-glass", ICON.pair); bPair.title = "pair the map with Sentinel-2 (P)";
           bPair.onclick = () => setPair(!st.pair);
           tools.append(bPair, bMore, bFit);
           pane.appendChild(tools);
@@ -3606,27 +3537,9 @@ def _(anywidget, asyncio, time, traitlets):
           pane.appendChild(fc);
           const tip = el_("div", "at-tip");
           pane.appendChild(tip);
-          // what the left side of the pair shows (or Overture, when it is the Color by), with its key
+          // what the left side of the pair shows, with its key
           const side = el_("div", "at-side at-glass");
           pane.appendChild(side);
-          const OV_PM = cfg.ov_pm || "https://tiles.overturemaps.org/2026-09-23.1";
-          const OV_C = {bld: "#56b4e9", road: "#e6e9ec", site: "#e69f00", built: "#9ba5af"};
-          const OV_LAYERS = [
-            {id: "ov-lu-built", type: "fill", source: "ov-base", "source-layer": "land_use",
-             filter: ["in", ["get", "class"], ["literal", ["residential", "industrial"]]], paint: {"fill-color": OV_C.built, "fill-opacity": 0.16}},
-            {id: "ov-lu-site", type: "fill", source: "ov-base", "source-layer": "land_use",
-             filter: ["all", ["!=", ["get", "class"], "greenfield"], ["any", ["in", ["get", "subtype"], ["literal", ["construction", "resource_extraction"]]], ["==", ["get", "class"], "landfill"]]],
-             paint: {"fill-color": OV_C.site, "fill-opacity": 0.4}},
-            {id: "ov-rail", type: "line", source: "ov-tr", "source-layer": "segment", filter: ["==", ["get", "subtype"], "rail"],
-             paint: {"line-color": OV_C.built, "line-width": 1.2, "line-dasharray": [2, 2]}},
-            {id: "ov-road", type: "line", source: "ov-tr", "source-layer": "segment", filter: ["==", ["get", "subtype"], "road"], layout: {"line-cap": "round", "line-join": "round"},
-             paint: {"line-color": OV_C.road, "line-opacity": 0.75, "line-width": ["interpolate", ["exponential", 1.6], ["zoom"],
-               10, ["match", ["get", "class"], ["motorway", "trunk"], 1.6, ["primary", "secondary"], 1.0, 0.4],
-               16, ["match", ["get", "class"], ["motorway", "trunk"], 9, ["primary", "secondary"], 6, "tertiary", 4, 2.5]]}},
-            {id: "ov-bld", type: "fill", source: "ov-bld", "source-layer": "building", paint: {"fill-color": OV_C.bld, "fill-opacity": 0.8, "fill-outline-color": "#b3dcf3"}},
-          ];
-          const ovShown = new Map();
-
           const more = el_("div", "at-more at-glass");
           const item = (title, sub, ctl) => { const r = el_("div", "item"); r.append(el_("div", "", `${title}${sub ? `<small>${sub}</small>` : ""}`), ctl); more.appendChild(r); return r; };
           const sw = (get, set) => { const b = el_("button", "at-sw"); b.setAttribute("role", "switch"); const sty = () => { b.classList.toggle("on", !!get()); b.setAttribute("aria-checked", String(!!get())); }; b.onclick = () => { set(!get()); sty(); }; sty(); b.sty = sty; return b; };
@@ -3656,14 +3569,11 @@ def _(anywidget, asyncio, time, traitlets):
 
           const about = el_("div", "at-about");
           about.innerHTML = `<div class="box at-glass">
-            <h2>Built-up ground on the fly</h2>
+            <h2>Earthwork</h2>
             <p><b>Earthwork</b> (E) is the chance the ground itself was dug, filled or graded between the first and last year read: a model on AlphaEarth taught where 3DEP lidar flew the same ground twice. Each hexagon shows its highest-scoring finer cell, so a single dig stands out. Pair (P) with Sentinel-2 to see what it is.</p>
-            <p>One layer at a time, picked in Color by. <b>WSF</b> (W) works at every zoom: the settlement extent by the year each 10 m pixel first read built, 2016 to the end of the years read.</p>
-            <p>The other modes are <b>AlphaEarth</b> in H3 hexagons, from zoom ${HEXZ}. From zoom ${cfg.otf_zoom || 13}, where AlphaEarth is read at 10 m, the <b>shared models</b> run on every pixel of the view: the <b>structure reading</b> (the chance a structure stands on or touches the ground, from the height implicit in AlphaEarth) and <b>All built</b> (other built-up, road, building, and the natural classes), refined by the view's own live teachers: Overture roads and footprints, WSF built-up away from both, and Impact Observatory's steady natural classes. Each answer is kept, for the view it last ran on, in H3 res 13 cells, and every hexagon is made from those, so the zoom levels agree. Only what is in view is read. Hexagons reach res 13 zoomed in.</p>
-            <p><b>Color by</b>: WSF (W), AEF Change (S), All built (A), Structure reading (R), First year built (Y). <b>Click</b> a hexagon for the model's account of it: its classes, structure, ground, built share by year, WSF, footprints, and how well the view's own fit did on teachers held out by block.</p>
+            <p>Both modes are <b>AlphaEarth</b> in H3 hexagons, from zoom ${HEXZ}. <b>AEF Change</b> (A) is how far the ground's AlphaEarth numbers moved between the first and last year read, nothing trained in between (on built ground only). <b>Click</b> a hexagon for its account.</p>
             <p><b>Hold space</b> to see the Sentinel-2 yearly imagery (Earth Genome, 2022 to 2025) instead of the hexagons; scroll while holding to step through the years.</p>
-            <p><small>Keys: E Earthwork, A AEF Change, O Overture, W WSF; hold space for the imagery, scroll or [ and ] for its year, B its first year or its latest; P pairs the map with Sentinel-2 (paired, O cycles the right map: AEF Change, Overture, WSF); F full screen; ; and ' its brightness; - = and _ + the years read; L place names; / search (a place, or paste an H3 string); X fill the window; Esc close.</small></p>
-            <p><small>WSF Tracker (c) DLR and MindEarth, via Source Cooperative. Overture Maps buildings, transportation and base, from Overture's PMTiles (ODbL; buildings also credit Microsoft, Google and Esri Community Maps).</small></p>
+            <p><small>Keys: E Earthwork, A AEF Change; hold space for the imagery, scroll or [ and ] for its year, B its first year or its latest; P pairs the map with Sentinel-2 (paired, O switches the right map: Earthwork, AEF Change); F full screen; ; and ' its brightness; - = and _ + the years read; L place names; / search (a place, or paste an H3 string); X fill the window; Esc close.</small></p>
             <p><small>AlphaEarth Foundations by Google and Google DeepMind (CC BY 4.0). ESA WorldCover 10 m 2021 v200, contains modified Copernicus Sentinel data processed by the ESA WorldCover consortium (CC BY 4.0). Impact Observatory, Microsoft and Esri 10 m annual land use and land cover v02, via Microsoft Planetary Computer (CC BY 4.0). Overture Maps transportation and land use, &copy;&nbsp;OpenStreetMap contributors (ODbL), from Overture's PMTiles. Sentinel-2 mosaics by Earth Genome (CC BY 4.0). Place names from Overture Maps divisions, &copy;&nbsp;OpenStreetMap contributors, Overture Maps Foundation (ODbL), with geoBoundaries, Esri Community Maps contributors and LINZ (CC BY 4.0): the PMTiles and, via Source Cooperative, fused/overture. Search by Photon over OpenStreetMap (ODbL). Basemap by Carto.</small></p>
             <div style="margin-top:12px"><button class="at-chip">Close</button></div></div>`;
           pane.appendChild(about);
@@ -3687,7 +3597,7 @@ def _(anywidget, asyncio, time, traitlets):
             const names = [];
             // each dataset being read, by name, once
             for (const p of busy)
-              for (const [nm, re] of [["AlphaEarth", /AlphaEarth/], ["WorldCover", /WorldCover/], ["Impact Observatory", /Impact Observatory/], ["Overture", /Overture/], ["WSF", /WSF/], ["the model", /^the model|fitting/]])
+              for (const [nm, re] of [["AlphaEarth", /AlphaEarth/], ["WorldCover", /WorldCover/], ["Impact Observatory", /Impact Observatory/], ["the model", /^the model|fitting/]])
                 if (re.test(p) && !names.includes(nm)) names.push(nm);
             bar.classList.toggle("busy", names.length > 0);
             note(names.length ? "Loading " + (names.length > 1 ? names.slice(0, -1).join(", ") + " and " + names[names.length - 1] : names[0]) + "…" : "");
@@ -3730,7 +3640,6 @@ def _(anywidget, asyncio, time, traitlets):
             for (let i = 0; i < N; i++) {
               const a8 = HB * i, o = 4 * i, lv = hattrs[a8 + 1];
               let col, a;
-              if (st.gmode === "wsf" || st.gmode === "ov") continue;
               if (st.gmode === "earth") {
                 // the chance the ground moved, on all ground: quiet ground faint, likely earthwork in full ink
                 const v = hattrs[a8 + 16];
@@ -3773,7 +3682,7 @@ def _(anywidget, asyncio, time, traitlets):
             }
             hexSeq++;
           }
-          const hexAt = (ll) => { if (res < 0 || !map || map.getZoom() < HEXZ) return -1; try { const h = latLngToCell(ll.lat, ll.lng, res); const i = hexIndex.get(h); return i == null || st.gmode === "wsf" || st.gmode === "ov" || (st.gmode === "much" && hattrs && !hattrs[HB * i + 8]) ? -1 : i; } catch (e) { return -1; } };
+          const hexAt = (ll) => { if (res < 0 || !map || map.getZoom() < HEXZ) return -1; try { const h = latLngToCell(ll.lat, ll.lng, res); const i = hexIndex.get(h); return i == null || (st.gmode === "much" && hattrs && !hattrs[HB * i + 8]) ? -1 : i; } catch (e) { return -1; } };
           function hexWords(i) {
             const o = HB * i, yb = hattrs[o], lv = hattrs[o + 1];
             if (!lv) return "No AlphaEarth data here.";
@@ -3934,7 +3843,7 @@ def _(anywidget, asyncio, time, traitlets):
             let h = st.holding
               ? `<div class="yr"><b>${st.imgYear}</b><span><span class="comp">${COMP_NAME[st.s2comp] || ""}</span><span class="comps">${COMPS.map(([k, l, t]) => `<button data-comp="${k}" class="${k === st.s2comp ? "on" : ""}" title="${esc(t)}">${l}</button>`).join("")}</span>Scroll or <kbd>[</kbd> <kbd>]</kbd> for another year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> for colors, <kbd>F</kbd> for full screen. Let go to see the hexagons.</span>${cbH}</div>`
               : st.pair
-              ? `<div class="yr quiet"><span><kbd>O</kbd> cycles the right map (AEF Change, Overture, WSF), <kbd>P</kbd> back to one map</span>${cbH}</div>`
+              ? `<div class="yr quiet"><span><kbd>O</kbd> switches the right map (Earthwork, AEF Change), <kbd>P</kbd> back to one map</span>${cbH}</div>`
               : `<div class="yr quiet"><span>Hold space for the Sentinel-2 imagery; <kbd>P</kbd> pairs it with the map</span>${cbH}</div>`;
             // the view's chart by year belongs to the layers that date things (one voice per layer)
             if (N && hattrs && (st.gmode === "first" || st.gmode === "much")) {
@@ -4352,55 +4261,6 @@ def _(anywidget, asyncio, time, traitlets):
               return new HexEdgeLayer(p, {data: null, image: null, pic: t.pic, col: t.col, bounds: [west, south, east, north]});
             },
           });
-          // ---- WSF: the context at every zoom (the atlas notebook's growth layer): each tile
-          // carries the half-year index in red, so "built by year Y" is colored here for any Y
-          const rawTiles = new Map();
-          async function rawTile({index, signal}) {
-            const u8 = await ask("wsfidx", 0, index, signal);
-            if (!u8) return null;
-            const bm = await createImageBitmap(new Blob([u8], {type: "image/png"}), {premultiplyAlpha: "none", colorSpaceConversion: "none"});
-            const c = new OffscreenCanvas(bm.width, bm.height);
-            const g = c.getContext("2d", {willReadFrequently: true});
-            g.drawImage(bm, 0, 0);
-            const d = g.getImageData(0, 0, bm.width, bm.height).data;
-            const k = new Uint8Array(bm.width * bm.height);
-            for (let i = 0, j = 0; i < k.length; i++, j += 4) k[i] = d[j + 3] ? d[j] : 0;
-            const t = {k, w: bm.width, h: bm.height, painted: null, key: null};
-            rawTiles.set(`${index.z}/${index.x}/${index.y}`, t);
-            if (rawTiles.size > 600) rawTiles.delete(rawTiles.keys().next().value);
-            return t;
-          }
-          // the year ramp: built before mid 2016 faint gray, later years by the ramp up to Y, none after
-          function growthLUT(Y) {
-            const lut = new Uint8ClampedArray(256 * 4);
-            for (let k = 1; k <= 20; k++) {
-              const yr = wsfYear(k), o = 4 * k;
-              let c = null, a = 0;
-              if (k === 1) { c = [150, 158, 166]; a = 150; }
-              else if (yr <= Y) { c = wsfCol(yr); a = 200; }
-              if (c) { lut[o] = c[0]; lut[o + 1] = c[1]; lut[o + 2] = c[2]; lut[o + 3] = a; }
-            }
-            return lut;
-          }
-          function paintRaw(t, Y) {
-            if (t.key === Y && t.painted) return t.painted;
-            const lut = growthLUT(Y);
-            const img = new ImageData(t.w, t.h), o = img.data;
-            for (let i = 0; i < t.k.length; i++) { const k = t.k[i]; if (!k) continue; const b = 4 * k, j = 4 * i; o[j] = lut[b]; o[j + 1] = lut[b + 1]; o[j + 2] = lut[b + 2]; o[j + 3] = lut[b + 3]; }
-            const c = document.createElement("canvas"); c.width = t.w; c.height = t.h;
-            c.getContext("2d").putImageData(img, 0, 0);
-            t.painted = c; t.key = Y;
-            return c;
-          }
-          const growthLayer = () => new TileLayer({
-            id: "wsf-growth",
-            getTileData: ({index, signal}) => rawTile({index, signal}),
-            onTileError: (e) => { if (!e || e.name !== "AbortError") say("wsf tile: " + ((e && e.message) || e)); },
-            tileSize: cfg.tile || 256, minZoom: 0, maxZoom: 14, refinementStrategy: "best-available", beforeId: slot(),
-            visible: st.gmode === "wsf" && !st.holding,
-            updateTriggers: {renderSubLayers: [st.y1]},
-            renderSubLayers: (p) => { if (!p.data) return null; const {west, south, east, north} = p.tile.bbox; return new BitmapLayer(p, {id: p.id + "-" + st.y1, data: null, image: paintRaw(p.data, st.y1), bounds: [west, south, east, north]}); },
-          });
           // ---- the model's res 13 (res 12 under zoom 14), from zoom OTF13_Z: tiles of the store's own cells (the
           // kernel sends each tile's cells, 8 bytes each, and every pixel's local cell), drawn
           // with the same edge layer. Hexagons this small cost nothing as an image.
@@ -4478,13 +4338,11 @@ def _(anywidget, asyncio, time, traitlets):
             // while holding: the imagery, and over it only the two outlines
             //
             // kept in the stack while hidden (holding, zoomed out) so its tiles stay cached
-            // WSF under the hexagons, at every zoom: the context the hexagons sit in
-            out.push(growthLayer());
             // the model's res 13 from OTF13_Z where it has run; the frame's hexagons otherwise
             const res13 = MODEL_MODES.includes(st.gmode) && !!hmeta.otf && z >= OTF13_Z;
             // the frame's colors (hcol) come a moment after its cells, so whether the hexagons are on
             // screen is judged without them
-            const hexShow = !st.holding && st.gmode !== "wsf" && st.gmode !== "ov" && !res13 && z >= HEXZ, hexOn = hexShow && !!hcol;
+            const hexShow = !st.holding && !res13 && z >= HEXZ, hexOn = hexShow && !!hcol;
             // nothing on screen to keep (the first frame, or the hexagons hidden): the new frame shows as it loads
             if (hmeta.seq && (!shownSeq || !hexShow)) shownSeq = hmeta.seq;
             if (hmeta.seq && shownSeq !== hmeta.seq) {
@@ -4493,7 +4351,7 @@ def _(anywidget, asyncio, time, traitlets):
               out.push(hexLayer(hexShow, shownSeq));
               out.push(hexLayer(false, s, () => showFrame(s)));
             } else if (hmeta.seq) out.push(hexLayer(hexOn, hmeta.seq));
-            if (hmeta.otf) out.push(otf13Layer(!st.holding && st.gmode !== "ov" && res13));
+            if (hmeta.otf) out.push(otf13Layer(!st.holding && res13));
             const hv = hover != null && hover >= 0 ? outline("hover", hexes[hover], [255, 255, 255, 235], 2) : null;
             if (hv) out.push(hv);
             // gold on the dark basemap (was near-black on the light one)
@@ -4504,7 +4362,7 @@ def _(anywidget, asyncio, time, traitlets):
             return out;
           }
           // the pair's left side: the imagery years, mounted as on the map so a year step is instant,
-          // and over the imagery or Overture the same outlines as on the right: the hexagon under
+          // and over the imagery the same outlines as on the right: the hexagon under
           // the pointer (on either side), the searched one and the picked one
           function layers2() {
             if (!st.pair || !map2) return [];
@@ -4522,8 +4380,6 @@ def _(anywidget, asyncio, time, traitlets):
           function update() {
             if (ov) ov.setProps({layers: layers()});
             if (ov2) ov2.setProps({layers: layers2()});
-            showOv(map, st.gmode === "ov" && !st.holding);
-            showOv(map2, false);
             renderSide();
           }
           function labels(on) {
@@ -4533,39 +4389,10 @@ def _(anywidget, asyncio, time, traitlets):
             }
           }
 
-          // ---- Overture, drawn by the map itself from Overture's PMTiles (the release the
-          // model's teachers read): land use, roads and buildings on the basemap, never over the
-          // imagery. O on one map shows it in the hexagons' place (Color by); in the pair, O cycles
-          // the right map through AEF Change, Overture and WSF. The land use drawn is what the land
-          // cover teachers take from it: residential and industrial land (built-up) and
-          // construction, quarries and landfill (construction; greenfield, planned but not
-          // broken, left out)
-          function addOv(m) {
-            if (!m || m.getSource("ov-bld")) return;
-            try {
-              m.addSource("ov-base", {type: "vector", url: "pmtiles://" + OV_PM + "/base.pmtiles"});
-              m.addSource("ov-tr", {type: "vector", url: "pmtiles://" + OV_PM + "/transportation.pmtiles"});
-              m.addSource("ov-bld", {type: "vector", url: "pmtiles://" + OV_PM + "/buildings.pmtiles"});
-              const before = slot(m);
-              for (const l of OV_LAYERS) m.addLayer({...l, layout: {...(l.layout || {}), visibility: "none"}}, m.getLayer(before) ? before : undefined);
-              ovShown.set(m, false);
-            } catch (e) { console.error("overture", e); }
-          }
-          function showOv(m, on) {
-            if (!m || !m.getLayer || !m.getLayer("ov-bld") || ovShown.get(m) === on) return;
-            ovShown.set(m, on);
-            for (const l of OV_LAYERS) m.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
-          }
           function renderSide() {
-            const ovOn = !st.pair && st.gmode === "ov" && !st.holding;
-            const on = st.pair || ovOn;
-            side.classList.toggle("on", on);
-            if (!on) return;
-            const sw = (c, t, ln) => `<span><i class="${ln ? "ln" : ""}" style="background:${c}"></i>${t}</span>`;
-            if (ovOn) side.innerHTML = `<b>Overture ${esc(OV_PM.split("/").pop())}</b>` + sw(OV_C.bld, "buildings") + sw(OV_C.road, "roads", true)
-              + sw("rgba(230,159,0,.7)", "construction, quarries, landfill") + sw("rgba(155,165,175,.55)", "residential, industrial")
-              ;
-            else side.innerHTML = `<b>Sentinel-2 ${st.imgYear}</b><span>${esc(COMP_NAME[st.s2comp] || "")}</span><span><kbd>[</kbd> <kbd>]</kbd> year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> colors</span>`;
+            side.classList.toggle("on", st.pair);
+            if (!st.pair) return;
+            side.innerHTML = `<b>Sentinel-2 ${st.imgYear}</b><span>${esc(COMP_NAME[st.s2comp] || "")}</span><span><kbd>[</kbd> <kbd>]</kbd> year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> colors</span>`;
           }
           side.addEventListener("click", (e) => { const b = e.target.closest && e.target.closest("button[data-left]"); if (b) setLeft(b.getAttribute("data-left")); });
           function setLeft(v) {
@@ -4578,7 +4405,7 @@ def _(anywidget, asyncio, time, traitlets):
           // ---- the pair (P) ---------------------------------------------------------------
           // a second map on the left, made the first time the pair opens; either map moves the
           // other. The right is the map as it was (its layer, card and clicks); the left shows
-          // Sentinel-2 (the year as the hold leaves it) or Overture
+          // Sentinel-2 (the year as the hold leaves it)
           let syncing = false;
           function boot2() {
             if (map2) return;
@@ -4587,7 +4414,7 @@ def _(anywidget, asyncio, time, traitlets):
             if (root._otf) { root._otf.map2 = map2; root._otf.layers2 = () => layers2().map((l) => l.id); }
             ov2 = new MapboxOverlay({interleaved: true, layers: [], onError: (e) => say("deck, left: " + (e && e.message ? e.message : e))});
             map2.addControl(ov2);
-            map2.on("load", () => { labels(st.labels); addOv(map2); update(); });
+            map2.on("load", () => { labels(st.labels); update(); });
             const follow = (a, b) => a.on("move", () => {
               if (syncing || !st.pair) return;
               syncing = true;
@@ -4793,11 +4620,11 @@ def _(anywidget, asyncio, time, traitlets):
             if (tgt && /^(INPUT|SELECT|TEXTAREA)$/.test(tgt.tagName)) return;
             const k = e.key, lo = st.y0, hi = st.y1;
             if (k === " ") { if (!e.repeat) spaceDown(); }
-            // paired, O cycles the right map through AEF Change, Overture and WSF (the left stays Sentinel-2)
-            else if ((k === "o" || k === "O") && st.pair) { if (!e.repeat) { const cyc = ["earth", "much", "ov", "wsf"]; st.want = cyc[(cyc.indexOf(st.gmode) + 1) % cyc.length]; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); } }
-            // Color by: A AEF Change, O Overture, W WSF; R and Y only with the models on
-            else if (/^[aAoOwWeE]$/.test(k) || (cfg.models && /^[rRyY]$/.test(k))) { const w = {e: "earth", a: "much", o: "ov", r: "struct", y: "first", w: "wsf"}[k.toLowerCase()]; st.want = w; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); }
-            // the kinds key's All (Q) / Built (W); otherwise W shows or hides WSF
+            // paired, O switches the right map between Earthwork and AEF Change (the left stays Sentinel-2)
+            else if ((k === "o" || k === "O") && st.pair) { if (!e.repeat) { const cyc = ["earth", "much"]; st.want = cyc[(cyc.indexOf(st.gmode) + 1) % cyc.length]; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); } }
+            // Color by: E Earthwork, A AEF Change; R and Y only with the models on
+            else if (/^[aAeE]$/.test(k) || (cfg.models && /^[rRyY]$/.test(k))) { const w = {e: "earth", a: "much", r: "struct", y: "first"}[k.toLowerCase()]; st.want = w; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); }
+            // the kinds key's All (Q) / Built (W)
             else if (/^[qQwW]$/.test(k)) { if (st.gmode !== "kinds") return; st.focus = (k === "q" || k === "Q") ? "all" : "built"; recolorHex(); styleKey(); update(); }
             else if (k === "p" || k === "P") setPair(!st.pair);
             else if (k === "[" || k === "]") stepImg(k === "]" ? 1 : -1);
@@ -4854,7 +4681,6 @@ def _(anywidget, asyncio, time, traitlets):
             map.addControl(ov);
             map.on("load", () => {
               labels(st.labels);
-              addOv(map);
               if (cfg.div_pm && !map.getSource("ov-div")) {
                 try {
                   map.addSource("ov-div", {type: "vector", url: "pmtiles://" + cfg.div_pm});
@@ -5105,11 +4931,11 @@ def _(
         "height": VIEW_H, "home": dict(HOME), "labels_slot": LABELS_SLOT, "tile": RASTER_TILE,
         "s2_year": S2_YEAR0, "s2_scale": S2_SCALE0, "s2_gen": 0, "s2_years": list(S2_YEARS), "s2_min_z": S2_TILE_MIN_Z,
         "aef_from": AEF_FROM0, "aef_to": AEF_TO0, "aef_years": list(AEF_YEARS_ALL),
-        "hex_zoom": HEX_ZOOM, "kinds_zoom": KINDS_MIN_ZOOM, "div_pm": OV_DIV_PM, "ov_pm": f"https://tiles.overturemaps.org/{OV_RELEASE}", "fit": _fit, "hold_ms": HOLD_MS, "hold_slop": HOLD_SLOP_PX,
+        "hex_zoom": HEX_ZOOM, "kinds_zoom": KINDS_MIN_ZOOM, "div_pm": OV_DIV_PM, "fit": _fit, "hold_ms": HOLD_MS, "hold_slop": HOLD_SLOP_PX,
         "viridis": VIRIDIS, "alpha_fill": ALPHA_FILL, "alpha_quiet": ALPHA_QUIET,
         "res_ladder": [ZOOM0, PER_RES, BASE_RES, MAX_RES],
         "otf_zoom": 13.0,
-        # the shared models off for now: Color by is AEF Change, Overture and WSF, nothing runs
+        # the shared models off for now: Color by is Earthwork and AEF Change, nothing runs
         # the models (True brings back All built, Structure reading and First year built)
         "models": False,
         # true color read and drawn in the browser (deck.gl-raster); False: the kernel's PNG tiles
@@ -5159,7 +4985,6 @@ def _(
     otf_on_frame,
     otf_run,
     wsf_label,
-    wsf_tile_png,
     asyncio,
     build_frame,
     cmap,
@@ -5287,8 +5112,6 @@ def _(
             out = await cpu(_job)
             cmap.tile_times[(src, z, x, y, year)] = {"wait": 1e3 * (ts["s"] - t0), "run": 1e3 * (ts["e"] - ts["s"])}
             return out
-        elif src == "wsfidx":
-            out = await wsf_tile_png(z, x, y)
         elif src == "otf13":
             out = await cpu(_otf_tile, z, x, y)
         elif src == "s2i":
