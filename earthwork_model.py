@@ -15,8 +15,9 @@ of moved ground was. The final model, taught on every digging site, is saved to 
 Sites are found by name in the TNM 1 m tile list, with the tile's flight dates from ScienceBase (or the 3DEP
 index); the two tiles are read on one 2 m grid over where they meet, and a site whose two flights cover less
 than 15% of it is skipped. The model is for digging by people: building sites (site grading) and mines
-teach it. Burn sites teach it only what is NOT digging (their unchanged ground; a burn scar looks like
-digging to a model shown only building sites). Storm sites only test it. (Burns and storms once taught both
+teach it. Burn sites and a coastal marsh teach it only what is NOT digging (their unchanged ground; a burn
+scar or tidal water looks like digging to a model shown only building sites), as does water lying in both
+flights at every site. Storm sites and the other marshes only test it. (Burns and storms once taught both
 ways, which made the model busier on bare ground and a little worse at digging.) DEM differences and AlphaEarth features are cached
 in data/earthwork/.
 
@@ -56,10 +57,14 @@ TEACH_KINDS = ("building", "mining")
 # ground nobody dug that looks a lot like digging to AlphaEarth (a burn scar): taught only as NOT digging, its
 # unchanged pixels and none of its moved ones, so the model learns that look is not earthwork
 QUIET_KINDS = ("burn",)
+# and one coastal marsh, mostly open brackish water (inland ponds did not teach it tidal water); the other
+# marshes only test whether that carries
+QUIET_SITES = ("brazoria-tx",)
 
 # (name, kind, a point inside the site, first project, second project); the 1 m tile holding the point is
-# used. Kinds: building (site grading) and mining (pits, quarries) teach; storm (coastal) and burn only test
-# (surface change over ground nobody dug: false alarms to watch). Tried and left out, the two flights
+# used. Kinds: building (site grading) and mining (pits, quarries) teach; burn (and one marsh, QUIET_SITES)
+# teach only as not digging; storm (coastal) and the other marshes only test (surface change over ground nobody dug: false alarms to watch; marsh
+# lidar is the least sure, the ground under reeds and shallow water partly the vegetation). Tried and left out, the two flights
 # sharing too little of the tile: Bingham Canyon UT (2018 has the pit, Salt Lake County 2023 only the valley),
 # Sierrita AZ, Morenci AZ, Las Vegas NV, Paradise CA, SW Washington clear-cuts, and second tiles at Columbus
 # NE and Aurora. Repeat 1 m lidar over working mines is rare: a 3 km window at 33 US mines and quarries found
@@ -77,6 +82,9 @@ SITES = [
     ("four-corners-fl", "mining", (-82.10, 27.65), "FL_Peninsular_FDEM_2018", "FL_ManateeCounty_B25"),
     ("hibbing-mn", "mining", (-93.066, 47.448), "MN_LakeSuperior_2021", "MN_UpperMissRiver_B22"),
     ("mexico-beach-fl", "storm", (-85.394, 29.956), "FL_Lower_Choctawhatchee_2017", "FL_HurricaneMichael_2020"),
+    ("brazoria-tx", "marsh", (-95.25, 29.07), "TX_CoastalRegion_2018", "TX_Houston_B24"),
+    ("anahuac-tx", "marsh", (-94.45, 29.62), "TX_CoastalRegion_2018", "TX_Houston_B24"),
+    ("myakka-fl", "marsh", (-82.25, 27.30), "FL_Peninsular_FDEM_2018", "FL_ManateeCounty_B25"),
     ("cameron-peak-co", "burn", (-105.650, 40.604), "CO_DRCOG_2020", "CO_ArapahoRooseveltPikeNF_D23"),
     ("grizzly-flats-ca", "burn", (-120.416, 38.595), "CA_UpperSouthAmerican_Eldorado_2019", "CA_SierraNevada_B22"),
 ]
@@ -167,20 +175,31 @@ def dem_change(url_a, url_b):
     dz = b - a
     share = float(np.isfinite(dz).mean())
     dz -= np.nanmedian(dz)
-    # standing water: lidar DEMs flatten it to its level on the day, so a pond higher or lower between flights
-    # reads as fill or a cut. Ground flat in BOTH DEMs (5 x 5 spread under 2 cm) is water both times: left out.
-    # A pond dug between the flights is flat only in the second, and stays in (it is digging)
+    # standing water: lidar DEMs flatten it to one exact level on the day (hydro-flattening: a 5 x 5 spread
+    # under 1 mm; paved or graded ground, flat as it is, spreads 5 to 20 mm, so a looser test drops graded pads).
+    # Water in BOTH flights has no dz (its level moved, not the ground) and is returned to be taught as NOT
+    # digging: water's AlphaEarth numbers shift from year to year, and a model never shown steady water reads
+    # it as a fresh pond. Water in ONE flight is digging only one way round: ground then lower water is a dug
+    # pond, water then higher ground a filled one; water then lower ground (a drawdown baring the bed) and
+    # ground then higher water (a flood) are left out
+    # (in float64 about the tile's median: squared elevations in float32 lose the millimeters above ~1000 m,
+    # and every 5 x 5 must be all data)
     def flat(z):
-        f = np.nan_to_num(z, nan=-9999.0)
+        ok = np.isfinite(z)
+        f = np.where(ok, z.astype(np.float64) - np.nanmedian(z), 0.0)
         m = ndimage.uniform_filter(f, 5)
-        return np.sqrt(np.maximum(ndimage.uniform_filter(f * f, 5) - m * m, 0)) < 0.02
-    dz[flat(a) & flat(b)] = np.nan
-    return dz, ta, crs, share
+        full = ndimage.uniform_filter(ok.astype(np.float64), 5) > 0.999
+        return ok & full & (np.sqrt(np.maximum(ndimage.uniform_filter(f * f, 5) - m * m, 0)) < 0.001)
+    fa, fb = flat(a), flat(b)
+    water = fa & fb & np.isfinite(dz)
+    with np.errstate(invalid="ignore"):
+        dz[water | (fa & ~fb & (dz < 0)) | (fb & ~fa & (dz > 0))] = np.nan
+    return dz, ta, crs, share, water
 
 
-def to_aef_grid(dz, tr, crs):
-    """Each AlphaEarth 10 m pixel over the tile: mean dz and the share of its 2 m cells that moved > 0.5 m
-    (5 x 5 samples a pixel), with the mosaic's row and column range."""
+def to_aef_grid(dz, tr, crs, water):
+    """Each AlphaEarth 10 m pixel over the tile: mean dz, the share of its 2 m cells that moved > 0.5 m and
+    the share that were water in both flights (5 x 5 samples a pixel), with the mosaic's row and column range."""
     h, w = dz.shape
     inv = Transformer.from_crs(crs, 4326, always_xy=True)
     c = [inv.transform(*(tr * (x, y))) for x, y in ((0, 0), (w, 0), (0, h), (w, h))]
@@ -196,10 +215,12 @@ def to_aef_grid(dz, tr, crs):
     cc, rr = (~tr) * (X, Y)
     v = ndimage.map_coordinates(dz, [rr - 0.5, cc - 0.5], order=0, mode="constant", cval=np.nan)
     v = v.reshape(y1 - y0, 5, x1 - x0, 5)
+    wv = ndimage.map_coordinates(water.astype(np.float32), [rr - 0.5, cc - 0.5], order=0, mode="constant", cval=0)
+    wet = wv.reshape(y1 - y0, 5, x1 - x0, 5).mean(axis=(1, 3))
     with np.errstate(invalid="ignore"):
         mean = np.nanmean(v, axis=(1, 3))
         moved = np.nanmean(np.abs(v) > MOVED_M, axis=(1, 3))
-    return mean.astype(np.float32), moved.astype(np.float32), (y0, y1, x0, x1)
+    return mean.astype(np.float32), moved.astype(np.float32), wet.astype(np.float32), (y0, y1, x0, x1)
 
 
 _emb = {}
@@ -229,7 +250,8 @@ def site_data(name, kind, point, p1, p2):
     path = f"{DATA}/{name}.npz"
     if os.path.exists(path):
         z = np.load(path, allow_pickle=True)
-        return {k: z[k] for k in z.files}
+        if "wet" in z.files:  # a site cached before water was kept (no "wet") is built again
+            return {k: z[k] for k in z.files}
     lon, lat = point
     t1, t2 = tile_for(lon, lat, p1), tile_for(lon, lat, p2)
     if not (t1 and t2):
@@ -244,8 +266,8 @@ def site_data(name, kind, point, p1, p2):
     if got is None or got[3] < MIN_OVERLAP:
         print(f"  {name}: skipped (the flights overlap on {0 if got is None else got[3]:.0%} of the tile)")
         return None
-    dz, tr, crs, share = got
-    mean, moved, rc = to_aef_grid(dz, tr, crs)
+    dz, tr, crs, share, water = got
+    mean, moved, wet, rc = to_aef_grid(dz, tr, crs, water)
     yb, ya = aef_years(d1, d2)
     if ya <= yb:
         print(f"  {name}: skipped (no AlphaEarth year between the flights {d1[0]}..{d1[1]} and {d2[0]}..{d2[1]})")
@@ -256,12 +278,14 @@ def site_data(name, kind, point, p1, p2):
     lab = np.full(mean.shape, -1, np.int8)
     lab[ok & (np.abs(mean) > MOVED_M)] = 1
     lab[ok & (np.abs(mean) < STILL_M) & (moved < 0.05)] = 0
+    # water in both flights (most of the pixel): unchanged, not digging
+    lab[okb & oka & (wet > 0.5) & (lab != 1)] = 0
     # each moved pixel's patch: connected moved pixels, in hectares
     px_ha = (AEF_RES * 111320 * np.cos(np.radians(lat))) * (AEF_RES * 110574) / 1e4
     cc, _ = ndimage.label(lab == 1, structure=np.ones((3, 3)))
     patch = (np.bincount(cc.ravel())[cc] * px_ha).astype(np.float32)
     out = {"X": features(b, a).astype(np.float16), "y": lab.ravel(), "plain": (1 - (a * b).sum(0)).ravel().astype(np.float32),
-           "dz": mean.ravel(), "patch": patch.ravel(), "meta": json.dumps({"name": name, "kind": kind, "flights": [f"{d1[0]}..{d1[1]}", f"{d2[0]}..{d2[1]}"],
+           "dz": mean.ravel(), "patch": patch.ravel(), "wet": (wet > 0.5).ravel(), "meta": json.dumps({"name": name, "kind": kind, "flights": [f"{d1[0]}..{d1[1]}", f"{d2[0]}..{d2[1]}"],
            "aef": [int(yb), int(ya)], "overlap": round(share, 3), "tiles": [u1, u2], "shape": list(mean.shape)})}
     np.savez_compressed(path, **out)
     return out
@@ -291,22 +315,22 @@ def main():
             m = json.loads(str(d["meta"]))
             lab = d["y"]
             print(f"  {name}: flights {m['flights'][0]} / {m['flights'][1]}, AlphaEarth {m['aef'][0]} vs {m['aef'][1]}, "
-                  f"overlap {m['overlap']:.0%}, moved {np.sum(lab == 1):,} px, unchanged {np.sum(lab == 0):,}  ({time.time() - t:.0f} s)")
+                  f"overlap {m['overlap']:.0%}, moved {np.sum(lab == 1):,} px, unchanged {np.sum(lab == 0):,} (water {int(d['wet'].sum()):,})  ({time.time() - t:.0f} s)")
             d["kind"] = kind
             sites[name] = d
     rng = np.random.default_rng(0)
     teach = [n for n, d in sites.items() if d["kind"] in TEACH_KINDS]
-    quiet = [n for n, d in sites.items() if d["kind"] in QUIET_KINDS]
+    quiet = [n for n, d in sites.items() if d["kind"] in QUIET_KINDS or n in QUIET_SITES]
     samples = {n: sample(sites[n], rng) for n in teach} | {n: sample(sites[n], rng, n_pos=0) for n in quiet}
     taught = teach + quiet
     final = fit([samples[n] for n in taught])
-    print(f"\nTaught on digging ({', '.join(TEACH_KINDS)}), and on {', '.join(QUIET_KINDS)} as not digging: each of those sites")
+    print(f"\nTaught on digging ({', '.join(TEACH_KINDS)}), and on {', '.join(quiet)} as not digging: each of those sites")
     print("scored by a model taught on the others; every other site (test only) by the model taught on all of them.")
     print("plain = AlphaEarth change, 1 - cos.")
     print("Quiet ground: the share of unchanged pixels scoring over 0.5 and over 0.8 (lower is quieter).")
     print(f"  {'site':20s} {'kind':9s} {'moved':>6s}   AP taught/plain   top 5% moved taught/plain   "
           f"moved > .5 / > .8   unchanged > .5 / > .8")
-    held = {}
+    held, water = {}, {}
     for name, d in sites.items():
         model = fit([samples[n] for n in taught if n != name]) if name in taught else final
         m = d["y"] >= 0
@@ -322,6 +346,12 @@ def main():
               + ("" if name in teach else "   (not digging)" if name in quiet else "   (test only)"))
         if name in teach:
             held[name] = (p, q, yt, d["dz"][m], d["patch"][m])
+        wet = d["wet"][m] & (yt == 0)
+        if wet.sum() >= 100:
+            water[name] = (int(wet.sum()), (p[wet] > .5).mean(), (p[wet] > .8).mean())
+    print("\nWater in both flights (unchanged, taught as not digging), held out: share scoring over 0.5 / over 0.8")
+    for name, (n, a, b) in water.items():
+        print(f"  {name:20s} {n:9,d} px   {a:5.1%} / {b:5.1%}")
     # is it only big digs? recall of moved pixels by depth and by patch size, at a cutoff that flags as many
     # pixels as truly moved at each site (so taught and plain flag the same number); every site, then mines
     for group, names in (("every digging site", list(held)), ("mining sites", [n for n in held if sites[n]["kind"] == "mining"])):
