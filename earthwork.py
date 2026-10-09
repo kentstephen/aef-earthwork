@@ -1290,9 +1290,16 @@ def _(change_resolution, np, os, pa):
     # AlphaEarth vectors of the window's first and last year
     _ew = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "earthwork-lr.npz"))
     EW_W, EW_B = _ew["w"].astype(np.float32), float(_ew["b"])
+    # ONLY WHERE ALPHAEARTH CHANGED: the score is multiplied by clip((change - LO) / (HI - LO), 0, 1), change
+    # = 1 - cos(b, a). The model reads each year's look too, and bare ground in both years (a graded pad at the
+    # US sites it learned from) reads as dug: open desert, which barely changes (about 0.04), lit up wholesale.
+    # Held out on 3DEP sites the gate costs no digging (mean AP .53 to .54) and takes the Cairo desert from
+    # 50% to 4% lit, the Sahara from 51% to 2%
+    GATE_LO, GATE_HI = 0.05, 0.15
 
     def _earthwork(Vf, Vl, chunk=200_000):
-        """The chance the ground moved, per row of Vf (first year) and Vl (last year); NaN where either is missing."""
+        """The chance the ground moved, per row of Vf (first year) and Vl (last year), gated by how far AlphaEarth
+        moved; NaN where either is missing."""
         out = np.full(len(Vf), np.nan, np.float32)
         for i in range(0, len(Vf), chunk):
             f, l = Vf[i:i + chunk], Vl[i:i + chunk]
@@ -1300,7 +1307,8 @@ def _(change_resolution, np, os, pa):
             b = np.nan_to_num(f) / np.maximum(np.linalg.norm(np.nan_to_num(f), axis=1), 1e-9)[:, None]
             a = np.nan_to_num(l) / np.maximum(np.linalg.norm(np.nan_to_num(l), axis=1), 1e-9)[:, None]
             z = np.c_[b, a, a * b, (a - b) ** 2] @ EW_W + EW_B
-            out[i:i + chunk] = np.where(ok, 1 / (1 + np.exp(-z)), np.nan)
+            gate = np.clip(((1.0 - (a * b).sum(1)) - GATE_LO) / (GATE_HI - GATE_LO), 0, 1)
+            out[i:i + chunk] = np.where(ok, gate / (1 + np.exp(-z)), np.nan)
         return out
 
     def build_frame(aef_by_year, y0, y1, res):
