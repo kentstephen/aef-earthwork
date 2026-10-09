@@ -34,7 +34,8 @@ between the first and last year read (2023 and 2025 to start, close to the Senti
 2022 to 2025; the years slider reaches back to 2017), not that its surface looked different. The model is earthwork_model.py's: a logistic regression on AlphaEarth's two years, taught
 where 3DEP lidar flew the same ground twice since 2017 (eight building sites and three mines), the
 difference of the two 1 m DEMs being the truth of where earth moved more than half a meter, and taught
-by two wildfire burns what is NOT digging (a burn scar otherwise reads as earthwork). Scored on sites
+what is NOT digging by two wildfire burns, a coastal marsh and the water lying in both flights at every
+site (burn scars and water otherwise read as earthwork). Scored on sites
 it never saw, it finds site grading far better than plain AlphaEarth change where much else changed
 (Huntsville AP .55, plain change .09); at mines it does no better than plain change. It finds digs
 from about half a hectare well and most house-pad-sized ones not at all (10 m pixels). The DEM
@@ -43,9 +44,9 @@ teaches; nothing on the map reads it.
 Each finer cell of the fold is scored, and each hexagon takes its highest-scoring finer cell (the
 frame's carry-the-peak), so one dig is not averaged away by the quiet ground around it. Viridis by
 the score, on all ground. P pairs the map with Earth Genome's Sentinel-2 on the left to see what each
-hot spot is (2022 to 2025 imagery). Every layer drawn comes from the embeddings: Earthwork and AEF
-Change. on_the_fly.py's other layers (Overture, WSF) and its background land cover teachers (Impact
-Observatory, Overture) are left out here; AEF Change's built ground comes from WorldCover.
+hot spot is (2022 to 2025 imagery). Earthwork is the only layer: on_the_fly.py's others (AEF Change,
+Overture, WSF) and its background land cover teachers (Impact Observatory, Overture) are left out, and
+AlphaEarth is read only over the window's years (Earthwork compares its two ends), never 2017 to 2025 whole.
 
 What follows is on_the_fly.py's own account (embeddings-on-the-fly), from which this is copied.
 
@@ -216,10 +217,9 @@ def _(mo):
     <small>A copy of aef-explorer's Kinds of change, with the shared models
     of embeddings-built-up run live on the view.</small>
 
-    **What you are looking at.** One layer at a time, picked in Color by:
-    Earthwork (`E`) or AEF Change (`A`), both from AlphaEarth. The shared
-    models below are off for now (cfg `models`), and nothing runs them.
-    The modes are hexagons, from zoom 9. From zoom 13.2, where
+    **What you are looking at.** One layer, Earthwork, from AlphaEarth, in
+    hexagons from zoom 9. The shared models below are off for now (cfg
+    `models`), and nothing runs them. From zoom 13.2, where
     AlphaEarth is read at 10 m, the shared models run on every pixel of the
     view in the background, and the model modes are drawn from their
     answers; before that they are empty.
@@ -247,11 +247,8 @@ def _(mo):
 
     | Key | Does |
     | --- | --- |
-    | `E` | Earthwork: the chance the ground itself moved, in viridis |
-    | `A` | AEF Change: how far the numbers moved, in viridis |
     | `space` (hold) | the Sentinel-2 imagery instead of the hexagons; the map still drags |
     | `P` | the pair: Sentinel-2 on the left, the map on the right, one camera |
-    | `O`, paired | the right map: Earthwork, AEF Change in turn |
     | scroll, space held | the imagery year |
     | `[` `]` | the imagery year, back and forward |
     | `B` | the imagery's first year (2022) or its latest (2025), back and forth |
@@ -3392,7 +3389,7 @@ def _(anywidget, asyncio, time, traitlets):
           const panel = el_("div", "at-panel at-glass");
           // every panel folds; the fold is remembered in this browser
           const keep = (k, v) => { try { if (v === undefined) return localStorage.getItem("aef-lc-" + k) === "1"; localStorage.setItem("aef-lc-" + k, v ? "1" : "0"); } catch (e) {} return false; };
-          const panelHd = el_("div", "at-hd", `<span class="t">AEF Change</span>`);
+          const panelHd = el_("div", "at-hd", `<span class="t">Earthwork</span>`);
           const panelCb = el_("button", "at-cb", ICON.chev);
           panelHd.appendChild(panelCb);
           panel.appendChild(panelHd);
@@ -3416,11 +3413,12 @@ def _(anywidget, asyncio, time, traitlets):
           // KINDS OF CHANGE COMMENTED OUT: AEF Change on built ground only
           const styleSeg = segOf(rFill, [["earth", "Earthwork", "the chance the ground itself moved (dug, filled, graded) between the first and last year read: a model taught by 3DEP repeat lidar", "E"],
                                           /* ["kinds", "Kinds of change", "the ground that moved most, grouped by the way it moved: the same color changed the same way. Click a kind in the key to hide or show it", "A"], */
-                                          ["much", "AEF Change", "how far the ground's AlphaEarth numbers moved between the first and last year read, nothing trained in between (on built ground only)", "A"],
                                           ...(cfg.models ? [["allbuilt", "All built", "other built-up, road and building, from the shared models run on every 10 m pixel and refined in the view", ""],
                                           ["struct", "Structure reading", "the chance a structure stands on or touches the ground, from the height implicit in AlphaEarth", "R"],
                                           ["first", "First year built", "the first year read in which the model calls the hexagon built", "Y"]] : [])],
                                   (k) => k === st.gmode, (k) => { if (k === "kinds" && !hmeta.kinds_ready) return; st.want = k; st.gmode = drawnMode(); recolorHex(); styleRows(); renderYear(); update(); });
+          // one layer (Earthwork) unless the models are on: no choice to show
+          if (!cfg.models) rFill.style.display = "none";
           // while Kinds of change waits: its button grayed, and a line under it with the zoom it
           // appears at and the zoom now
           const rSoon = rowOf("");
@@ -3571,9 +3569,9 @@ def _(anywidget, asyncio, time, traitlets):
           about.innerHTML = `<div class="box at-glass">
             <h2>Earthwork</h2>
             <p><b>Earthwork</b> (E) is the chance the ground itself was dug, filled or graded between the first and last year read: a model on AlphaEarth taught where 3DEP lidar flew the same ground twice. Each hexagon shows its highest-scoring finer cell, so a single dig stands out. Pair (P) with Sentinel-2 to see what it is.</p>
-            <p>Both modes are <b>AlphaEarth</b> in H3 hexagons, from zoom ${HEXZ}. <b>AEF Change</b> (A) is how far the ground's AlphaEarth numbers moved between the first and last year read, nothing trained in between (on built ground only). <b>Click</b> a hexagon for its account.</p>
+            <p>Earthwork is drawn in H3 hexagons from zoom ${HEXZ}. <b>Click</b> a hexagon for its account.</p>
             <p><b>Hold space</b> to see the Sentinel-2 yearly imagery (Earth Genome, 2022 to 2025) instead of the hexagons; scroll while holding to step through the years.</p>
-            <p><small>Keys: E Earthwork, A AEF Change; hold space for the imagery, scroll or [ and ] for its year, B its first year or its latest; P pairs the map with Sentinel-2 (paired, O switches the right map: Earthwork, AEF Change); F full screen; ; and ' its brightness; - = and _ + the years read; L place names; / search (a place, or paste an H3 string); X fill the window; Esc close.</small></p>
+            <p><small>Keys: hold space for the imagery, scroll or [ and ] for its year, B its first year or its latest; P pairs the map with Sentinel-2; F full screen; ; and ' its brightness; - = and _ + the years read; L place names; / search (a place, or paste an H3 string); X fill the window; Esc close.</small></p>
             <p><small>AlphaEarth Foundations by Google and Google DeepMind (CC BY 4.0). ESA WorldCover 10 m 2021 v200, contains modified Copernicus Sentinel data processed by the ESA WorldCover consortium (CC BY 4.0). Impact Observatory, Microsoft and Esri 10 m annual land use and land cover v02, via Microsoft Planetary Computer (CC BY 4.0). Overture Maps transportation and land use, &copy;&nbsp;OpenStreetMap contributors (ODbL), from Overture's PMTiles. Sentinel-2 mosaics by Earth Genome (CC BY 4.0). Place names from Overture Maps divisions, &copy;&nbsp;OpenStreetMap contributors, Overture Maps Foundation (ODbL), with geoBoundaries, Esri Community Maps contributors and LINZ (CC BY 4.0): the PMTiles and, via Source Cooperative, fused/overture. Search by Photon over OpenStreetMap (ODbL). Basemap by Carto.</small></p>
             <div style="margin-top:12px"><button class="at-chip">Close</button></div></div>`;
           pane.appendChild(about);
@@ -3823,7 +3821,12 @@ def _(anywidget, asyncio, time, traitlets):
                 if (last.structure != null && last.structure < 50) h += `<p class="sub">Not drawn: the map shows only where a structure stands (the structure reading at 50% or more), and it reads ${Math.round(last.structure)}% here.</p>`;
               }
             } else if (c.level == null) h += `<p>No AlphaEarth data here.</p>`;
-            else {
+            else if (mode === "earth") {
+              const i = c.cell ? hexIndex.get(c.cell) : null, v = i != null && hattrs ? hattrs[HB * i + 16] : 0;
+              h += `<h4>Earthwork</h4>`;
+              h += v ? `<p><b>${Math.round(100 * (v - 1) / 254)}%</b>: the chance the ground itself was dug, filled or graded from ${c.y0} to ${c.y1} (its highest-scoring patch).</p>` : `<p>No score here.</p>`;
+              h += `<p class="sub">Pair with Sentinel-2 (<kbd>P</kbd>) or hold space to see what it is.</p>`;
+            } else {
               h += `<h4>AEF Change</h4>`;
               h += `<p>The ground changed <b>${howMuch(c.level)}</b> from ${c.y0} to ${c.y1}, compared with the rest of the view. Its year-to-year change stood out most between the <b>${c.big - 1} and ${c.big}</b> pictures${c.stand != null ? `, ${c.stand.toFixed(1)} times the usual step in view that year` : ""}.</p>`;
               if (c.hist && c.ccode) h += `<p class="sub">${histText(c.ccode, c.big, c.hist, c.cratio)}${c.hbig > 0 && (c.hbig <= c.y0 || c.hbig > c.y1) ? ` Its biggest step from ${c.hist[0]} to ${c.hist[1]} was into ${c.hbig}, outside the years read.` : ""}</p>`;
@@ -3843,7 +3846,7 @@ def _(anywidget, asyncio, time, traitlets):
             let h = st.holding
               ? `<div class="yr"><b>${st.imgYear}</b><span><span class="comp">${COMP_NAME[st.s2comp] || ""}</span><span class="comps">${COMPS.map(([k, l, t]) => `<button data-comp="${k}" class="${k === st.s2comp ? "on" : ""}" title="${esc(t)}">${l}</button>`).join("")}</span>Scroll or <kbd>[</kbd> <kbd>]</kbd> for another year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> for colors, <kbd>F</kbd> for full screen. Let go to see the hexagons.</span>${cbH}</div>`
               : st.pair
-              ? `<div class="yr quiet"><span><kbd>O</kbd> switches the right map (Earthwork, AEF Change), <kbd>P</kbd> back to one map</span>${cbH}</div>`
+              ? `<div class="yr quiet"><span><kbd>P</kbd> back to one map</span>${cbH}</div>`
               : `<div class="yr quiet"><span>Hold space for the Sentinel-2 imagery; <kbd>P</kbd> pairs it with the map</span>${cbH}</div>`;
             // the view's chart by year belongs to the layers that date things (one voice per layer)
             if (N && hattrs && (st.gmode === "first" || st.gmode === "much")) {
@@ -4620,10 +4623,8 @@ def _(anywidget, asyncio, time, traitlets):
             if (tgt && /^(INPUT|SELECT|TEXTAREA)$/.test(tgt.tagName)) return;
             const k = e.key, lo = st.y0, hi = st.y1;
             if (k === " ") { if (!e.repeat) spaceDown(); }
-            // paired, O switches the right map between Earthwork and AEF Change (the left stays Sentinel-2)
-            else if ((k === "o" || k === "O") && st.pair) { if (!e.repeat) { const cyc = ["earth", "much"]; st.want = cyc[(cyc.indexOf(st.gmode) + 1) % cyc.length]; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); } }
-            // Color by: E Earthwork, A AEF Change; R and Y only with the models on
-            else if (/^[aAeE]$/.test(k) || (cfg.models && /^[rRyY]$/.test(k))) { const w = {e: "earth", a: "much", r: "struct", y: "first"}[k.toLowerCase()]; st.want = w; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); }
+            // Color by: E Earthwork; R and Y only with the models on
+            else if (/^[eE]$/.test(k) || (cfg.models && /^[rRyY]$/.test(k))) { const w = {e: "earth", r: "struct", y: "first"}[k.toLowerCase()]; st.want = w; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); }
             // the kinds key's All (Q) / Built (W)
             else if (/^[qQwW]$/.test(k)) { if (st.gmode !== "kinds") return; st.focus = (k === "q" || k === "Q") ? "all" : "built"; recolorHex(); styleKey(); update(); }
             else if (k === "p" || k === "P") setPair(!st.pair);
@@ -5425,8 +5426,9 @@ def _(
         rbox = tuple(round(v, 3) for v in box)
         key = (y0, y1, res, rbox)
         t0 = time.time()
-        # zoomed in far enough, the whole history follows once the window is up
-        hist = rres >= HIST_MIN_RES
+        # Earthwork compares the window's two ends only: the whole history (AEF Change's, not drawn here)
+        # is never read
+        hist = False
         ht = HOLD.get("hist_task")
         if ht is not None and ht[0] != key and ht[1] is not None:
             ht[1].cancel()
