@@ -274,14 +274,9 @@ def _(os, tempfile):
     # may drift before it counts as a pan instead
     HOLD_MS, HOLD_SLOP_PX = 200, 5
 
-    # the hexagons reach the browser as tiles of cell numbers, not polygons
-    #: each 256 px map
-    # tile is drawn at HEX_TILE_PX a side, every pixel the row of the hexagon
-    # it falls in, colored in the browser
-    HEX_TILE_PX = 512
-    # the zoom ladder below picks the READ res (which AlphaEarth overview is
-    # read). With the hexagons drawn as an image their count no longer costs
-    # the browser, so two knobs, same download:
+    # the hexagons reach the browser as cell ids and are drawn there as
+    # geometry. The zoom ladder below picks the READ res (which AlphaEarth
+    # overview is read); two knobs, same download:
     # HEX_UP: the hexagons drawn are this many levels finer than the read res
     #   (1 is about one hexagon per pixel of the read; past that, empty cells)
     # CARRY_RES: the fold runs this many levels finer than the hexagons drawn,
@@ -315,7 +310,6 @@ def _(os, tempfile):
         CACHE_DIR,
         CARRY_RES,
         CELL_BUDGET,
-        HEX_TILE_PX,
         HEX_UP,
         HEX_ZOOM,
         HOLD_MS,
@@ -861,8 +855,27 @@ def _(
     # chosen or a hold starts somewhere the stretch was not taken
     #   urban        B12 B11 B4: built ground and bare soil apart by hue
     #   blueyellow   B11 B11 B2: SWIR on red and green, blue on blue: sand yellow, concrete blue
-    S2_COMPOSITES = {"tci": None, "urban": ("B12", "B11", "B04"), "blueyellow": ("B11", "B11", "B02")}
-    _BANDS = ("B02", "B04", "B11", "B12")
+    #   ndbi         (B11 - B8A) / (B11 + B8A): built-up and bare ground high, vegetation and water low
+    #   mineral      iron oxides (B4 / B2) and clays (B11 / B12) on bare ground, vegetation (NDVI) masked
+    # The two indexes are drawn only in the browser, stretched from the view's 2nd to 98th percentile
+    # of each quantity (S2_INDEXES; the browser computes the same quantities, s2BandTileData)
+    S2_COMPOSITES = {"tci": None, "urban": ("B12", "B11", "B04"), "blueyellow": ("B11", "B11", "B02"),
+                     "ndbi": ("B11", "B8A"), "mineral": ("B02", "B03", "B04", "B11", "B12", "B8A")}
+    _BANDS = ("B02", "B03", "B04", "B8A", "B11", "B12")
+
+    def _bare(b):
+        """0 under vegetation (NDVI 0.45 and up) to 1 on bare ground (NDVI 0.2 and under), and 0 on water
+        (MNDWI 0.05 and up, land from -0.10), whose band ratios are noise. B11 alone does not find the
+        water: the yearly medians blend rivers with their banks."""
+        ndvi = (b["B8A"] - b["B04"]) / (b["B8A"] + b["B04"])
+        mndwi = (b["B03"] - b["B11"]) / (b["B03"] + b["B11"])
+        return np.clip((0.45 - ndvi) / 0.25, 0, 1) * np.clip((0.05 - mndwi) / 0.15, 0, 1)
+
+    # name -> (quantities from the bands as float arrays, which pixels each one's stretch is taken over)
+    S2_INDEXES = {
+        "ndbi": (lambda b: [(b["B11"] - b["B8A"]) / (b["B11"] + b["B8A"])], lambda b: None),
+        "mineral": (lambda b: [b["B04"] / b["B02"], b["B11"] / b["B12"], _bare(b)], lambda b: _bare(b) > 0.5),
+    }
     # (above every function that uses them: marimo drops a cell's private name used before it is defined)
     _comp = {"name": "tci", "box": None, "scale": None, "gen": 0, "lock": None}
 
@@ -954,28 +967,124 @@ def _(
             ids = [i for i in await _s2_items(box, yr) if not _items[i].get("fill")]
             if ids:
                 break
+
+        async def _vals(iid, band):
+            path = _items[iid].get("bands", {}).get(band)
+            g = await _get(path) if path else None
+            if g is None:
+                return None
+            lv, px = _level(g, max((x1 - x0), (y1 - y0)) / 512)
+            L, _B, R_, Tt = g.bounds
+            H, W = lv.shape
+            c0, c1 = max(0, int((x0 - L) / px)), min(W, int(math.ceil((x1 - L) / px)))
+            r0, r1 = max(0, int((Tt - y1) / px)), min(H, int(math.ceil((Tt - y0) / px)))
+            if c1 <= c0 or r1 <= r0:
+                return None
+            async with _sem:
+                ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
+            a = np.asarray(np.ma.filled(ra.as_masked(), 0)).ravel()
+            return a[a > 0]
+
+        # every footprint and band at once (the round trips overlap)
+        ub = sorted(set(S2_COMPOSITES[_comp["name"]]))
+        got = await asyncio.gather(*(_vals(i, b) for b in ub for i in ids[:6]))
         out = {}
-        for band in sorted(set(S2_COMPOSITES[_comp["name"]])):
-            vals = []
-            for iid in ids[:6]:
-                path = _items[iid].get("bands", {}).get(band)
-                g = await _get(path) if path else None
-                if g is None:
-                    continue
-                lv, px = _level(g, max((x1 - x0), (y1 - y0)) / 512)
-                L, _B, R_, Tt = g.bounds
-                H, W = lv.shape
-                c0, c1 = max(0, int((x0 - L) / px)), min(W, int(math.ceil((x1 - L) / px)))
-                r0, r1 = max(0, int((Tt - y1) / px)), min(H, int(math.ceil((Tt - y0) / px)))
-                if c1 <= c0 or r1 <= r0:
-                    continue
-                async with _sem:
-                    ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
-                a = np.asarray(np.ma.filled(ra.as_masked(), 0)).ravel()
-                vals.append(a[a > 0])
+        for k, band in enumerate(ub):
+            vals = [v for v in got[k * len(ids[:6]):(k + 1) * len(ids[:6])] if v is not None]
             v = np.concatenate(vals) if vals else np.zeros(0)
             out[band] = float(np.percentile(v, 98)) if len(v) > 100 else 3000.0
         return out
+
+    async def _index_scale():
+        """{lo, hi}: each quantity of the chosen index at the 2nd and 98th percentile over the view
+        (the bare channel of mineral is 0 to 1 as it is), from the latest year with imagery there.
+        Every band at one pixel size (20 m or coarser), where the yearly footprints' bands share a grid."""
+        box = _comp["box"]
+        name = _comp["name"]
+        if box is None:
+            return {}
+        W_, S_, E_, N_ = box
+        mx = lambda lon: _R * math.radians(lon)
+        my = lambda lat: _R * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+        x0, x1, y0, y1 = mx(W_), mx(E_), my(S_), my(N_)
+        tpx = max(max(x1 - x0, y1 - y0) / 512, 19.2)
+        ids = []
+        for yr in reversed(S2_YEARS):
+            ids = [i for i in await _s2_items(box, yr) if not _items[i].get("fill")]
+            if ids:
+                break
+        bands = sorted(set(S2_COMPOSITES[name]))
+        quant, where = S2_INDEXES[name]
+
+        async def _win(iid, band):
+            path = _items[iid].get("bands", {}).get(band)
+            g = await _get(path) if path else None
+            if g is None:
+                return None
+            lv, px = _level(g, tpx)
+            L, _B, R_, Tt = g.bounds
+            H, W = lv.shape
+            c0, c1 = max(0, int((x0 - L) / px)), min(W, int(math.ceil((x1 - L) / px)))
+            r0, r1 = max(0, int((Tt - y1) / px)), min(H, int(math.ceil((Tt - y0) / px)))
+            if c1 <= c0 or r1 <= r0:
+                return None
+            async with _sem:
+                ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
+            return np.asarray(np.ma.filled(ra.as_masked(), 0)).reshape(r1 - r0, c1 - c0)
+
+        use = ids[:6]
+        got = await asyncio.gather(*(_win(i, b) for i in use for b in bands))
+        per = []
+        for k in range(len(use)):
+            arrs = got[k * len(bands):(k + 1) * len(bands)]
+            if any(a is None for a in arrs):
+                continue
+            h, w = min(a.shape[0] for a in arrs), min(a.shape[1] for a in arrs)
+            b = {n: a[:h, :w].astype(np.float32) for n, a in zip(bands, arrs)}
+            ok = np.all([a > 0 for a in b.values()], 0)
+            if ok.sum() < 100:
+                continue
+            b = {n: a[ok] for n, a in b.items()}
+            m = where(b)
+            per.append([q if m is None else q[m] for q in quant(b)])
+        if not per:
+            return {}
+        lo, hi = [], []
+        for j in range(len(per[0])):
+            v = np.concatenate([p[j] for p in per])
+            v = v[np.isfinite(v)]
+            fixed = (name == "mineral" and j == 2) or len(v) <= 100
+            lo.append(0.0 if fixed else float(np.percentile(v, 2)))
+            hi.append(1.0 if fixed else float(np.percentile(v, 98)))
+        return {"lo": lo, "hi": hi}
+
+    async def _scale_now(cgen):
+        """The stretch for the colors chosen (generation cgen), taken once."""
+        if _comp["lock"] is None:
+            _comp["lock"] = asyncio.Lock()
+        async with _comp["lock"]:
+            if _comp["gen"] != cgen:
+                return {}  # other colors were chosen meanwhile
+            if _comp["scale"] is None:
+                v = await (_index_scale() if _comp["name"] in S2_INDEXES else _comp_scale())
+                # kept only if the colors did not change while it was taken (it would be the old colors')
+                if _comp["gen"] == cgen:
+                    _comp["scale"] = v
+                return v
+            return _comp["scale"]
+
+    async def s2_stretch():
+        """The false colors' stretch for the browser, which reads the bands itself:
+        {comp, gen, band: 98th percentile (reflectance x 10,000)}, or None for true color."""
+        cname, cgen = _comp["name"], _comp["gen"]
+        if not S2_COMPOSITES.get(cname):
+            return None
+        scale = await _scale_now(cgen)
+        if _comp["gen"] != cgen:
+            return None
+        if cname in S2_INDEXES:
+            return {"comp": cname, "gen": cgen, "lo": scale.get("lo", [0.0] * 3), "hi": scale.get("hi", [1.0] * 3)}
+        return {"comp": cname, "gen": cgen, **{b: scale.get(b, 3000.0) for b in set(S2_COMPOSITES[cname])}}
 
     def _tile_ll(z, x, y):
         n = 2 ** z
@@ -1040,14 +1149,11 @@ def _(
                 ra = await lv.read(window=Window(col_off=c0, row_off=r0, width=c1 - c0, height=r1 - r0))
             return ra, c0, r0, r1 - r0, c1 - c0, px, L, Tt
 
+        if cname in S2_INDEXES:
+            return None  # the indexes are drawn in the browser only
         bands = S2_COMPOSITES.get(cname)
         if bands:
-            if _comp["lock"] is None:
-                _comp["lock"] = asyncio.Lock()
-            async with _comp["lock"]:
-                if _comp["scale"] is None and _comp["gen"] == cgen:
-                    _comp["scale"] = await _comp_scale()
-            scale = _comp["scale"] or {}
+            scale = await _scale_now(cgen)
 
             async def _read_band(iid, band):
                 path = _items[iid].get("bands", {}).get(band)
@@ -1146,12 +1252,13 @@ def _(
 
     async def s2_items_json(z, x, y, year):
         """The year's footprints under Web Mercator tile (z, x, y), for the browser to read
-        itself (deck.gl-raster): JSON bytes, a list of {id, url of its TCI COG, bbox, fill},
-        yearly first. The same STAC search (and the same fallback when the STAC lags) as
-        the kernel's own tiles."""
+        itself (deck.gl-raster): JSON bytes, a list of {id, url of its TCI COG, bbox, fill,
+        bands: the raw band COGs' urls}, yearly first. The same STAC search (and the same
+        fallback when the STAC lags) as the kernel's own tiles."""
         ids = await _s2_items(_tile_ll(z, x, y), year)
-        return json.dumps([{"id": i, "url": "https://data.source.coop/" + _items[i]["tci"], "bbox": _items[i].get("bbox"),
-                            "fill": bool(_items[i].get("fill"))} for i in ids]).encode()
+        sc = "https://data.source.coop/"
+        return json.dumps([{"id": i, "url": sc + _items[i]["tci"], "bbox": _items[i].get("bbox"), "fill": bool(_items[i].get("fill")),
+                            "bands": {k: sc + v for k, v in _items[i].get("bands", {}).items()}} for i in ids]).encode()
 
     def s2_set_scale(v):
         """The header's `gamma`: the curve the next S2 tiles are encoded with.
@@ -1169,7 +1276,7 @@ def _(
         fill = {y: f / p for y, (f, p) in _fill.items() if f and p}
         return dict(_tstat, cached=len(_png), scale=_gain["v"], fill=fill)
 
-    return S2_COMPOSITES, s2_items_json, s2_raster_stats, s2_set_composite, s2_set_scale, s2_tile_png
+    return S2_COMPOSITES, s2_items_json, s2_raster_stats, s2_set_composite, s2_set_scale, s2_stretch, s2_tile_png
 
 
 @app.cell
@@ -1289,7 +1396,8 @@ def _(change_resolution, np, os, pa):
     # EARTHWORK: earthwork_model.py's logistic regression on [b, a, a * b, (a - b)^2], b and a the unit
     # AlphaEarth vectors of the window's first and last year
     # (from the repo on GitHub when the notebook runs without its folder, as in molab)
-    _ewp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "earthwork-lr.npz")
+    _ewd = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+    _ewp = os.path.join(_ewd, "earthwork-lr.npz")
     if os.path.exists(_ewp):
         _ew = np.load(_ewp)
     else:
@@ -1297,7 +1405,14 @@ def _(change_resolution, np, os, pa):
         import urllib.request as _ur
         with _ur.urlopen("https://raw.githubusercontent.com/kentstephen/aef-earthwork/main/models/earthwork-lr.npz", timeout=60) as _r:
             _ew = np.load(_io.BytesIO(_r.read()))
-    EW_W, EW_B = _ew["w"].astype(np.float32), float(_ew["b"])
+    # every model to compare (M on the map): "current" is earthwork-lr.npz, the others its variants in models/
+    # (earthwork-lr-<name>.npz) that read the same 256 features
+    EW_MODELS = {"current": (_ew["w"].astype(np.float32), float(_ew["b"]))}
+    for _f in sorted(os.listdir(_ewd)) if os.path.isdir(_ewd) else []:
+        if _f.startswith("earthwork-lr-") and _f.endswith(".npz"):
+            _m = np.load(os.path.join(_ewd, _f))
+            if _m["w"].shape == (256,):
+                EW_MODELS[_f[len("earthwork-lr-"):-len(".npz")]] = (_m["w"].astype(np.float32), float(_m["b"]))
     # ONLY WHERE ALPHAEARTH CHANGED: the score is multiplied by clip((change - LO) / (HI - LO), 0, 1), change
     # = 1 - cos(b, a). The model reads each year's look too, and bare ground in both years (a graded pad at the
     # US sites it learned from) reads as dug: open desert, which barely changes (about 0.04), lit up wholesale.
@@ -1311,9 +1426,10 @@ def _(change_resolution, np, os, pa):
     # hexagons carry a high peak, and a log puts everything from 50% to 100% within 0.7 of 0)
     LOGIT_LO, LOGIT_HI = -30.0, 15.0
 
-    def _earthwork(Vf, Vl, chunk=200_000):
+    def _earthwork(Vf, Vl, model="current", chunk=200_000):
         """The chance the ground moved, per row of Vf (first year) and Vl (last year), gated by how far AlphaEarth
-        moved, and its log-odds (clipped to LOGIT_LO..HI); NaN where either is missing."""
+        moved, and its log-odds (clipped to LOGIT_LO..HI); NaN where either is missing. model: a key of EW_MODELS."""
+        EW_W, EW_B = EW_MODELS.get(model, EW_MODELS["current"])
         out = np.full(len(Vf), np.nan, np.float32)
         logs = np.full(len(Vf), np.nan, np.float32)
         for i in range(0, len(Vf), chunk):
@@ -1332,7 +1448,7 @@ def _(change_resolution, np, os, pa):
             logs[i:i + chunk] = np.where(ok, np.clip(lp - lq, LOGIT_LO, LOGIT_HI), np.nan)
         return out, logs
 
-    def build_frame(aef_by_year, y0, y1, res):
+    def build_frame(aef_by_year, y0, y1, res, model="current"):
         if aef_by_year.get(y0) is None or aef_by_year.get(y1) is None:
             return None
         # both years on the first year's cells (sorted, see _compact), NaN where the last has none
@@ -1351,7 +1467,7 @@ def _(change_resolution, np, os, pa):
         cellid = np.unique(par)
         n = len(cellid)
         hix = np.searchsorted(cellid, par)
-        earth_f, elog_f = _earthwork(aef_by_year[y0]["V"], Vl)
+        earth_f, elog_f = _earthwork(aef_by_year[y0]["V"], Vl, model)
         earth = np.full(n, -1.0, np.float32)
         elog = np.full(n, -np.inf, np.float32)
         okf = np.isfinite(earth_f)
@@ -1368,7 +1484,7 @@ def _(change_resolution, np, os, pa):
             "score": f"Earthwork {y0} to {y1}: {int(scored.sum()):,} of {n:,} hexagons scored, peak of {nfine:,} finer cells",
         }
 
-    return LOGIT_HI, LOGIT_LO, build_frame
+    return EW_MODELS, LOGIT_HI, LOGIT_LO, build_frame
 
 
 @app.cell
@@ -1532,6 +1648,14 @@ def _(anywidget, asyncio, time, traitlets):
         .at-key{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;font-size:12.5px;color:var(--muted);flex:1 1 auto;min-width:0}
         .at-key .why{flex-basis:100%;white-space:normal;font-size:11.5px;line-height:1.35}
         .at-ramp{height:10px;border-radius:3px;width:150px}
+        /* the area scale's floor (A): one thumb on the Years read slider's track, the ramp's inked part to its right */
+        .at-afl-hd{flex-basis:100%}
+        .at-afl-lo{min-width:52px}
+        .at-afl{flex-basis:100%;display:flex;align-items:center;gap:10px;margin:2px 0 1px}
+        .at-afl-win{width:190px}
+        .at-afl-win input{pointer-events:auto}
+        .at-afl-win input:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 2px var(--cool)}
+        .at-afl-win .tks i.on{color:var(--text);font-weight:600}
         .at-win{position:relative;width:170px;height:28px;flex:0 0 auto}
         .at-win input{position:absolute;left:0;top:0;width:100%;height:22px;margin:0;background:none;pointer-events:none;-webkit-appearance:none;appearance:none}
         .at-win input:focus{outline:none}
@@ -1746,7 +1870,7 @@ def _(anywidget, asyncio, time, traitlets):
           const A_FILL = cfg.alpha_fill || 235, A_QUIET = cfg.alpha_quiet || 70, A_DIM = 45;
           const HEXZ = cfg.hex_zoom || 9, HOLD_MS = cfg.hold_ms || 200, SLOP = cfg.hold_slop || 5;
           const st = {
-            gmode: "earth", want: "earth", area: false, noPick: false, hideKinds: new Set(), focus: "all", y0: cfg.aef_from || 2022, y1: cfg.aef_to || 2025,
+            gmode: "earth", want: "earth", area: false, areaFloor: 0, noPick: false, hideKinds: new Set(), focus: "all", y0: cfg.aef_from || 2022, y1: cfg.aef_to || 2025,
             imgYear: cfg.s2_year || S2Y[S2Y.length - 1], labels: true, s2scale: Number(cfg.s2_scale) || 1, s2comp: cfg.s2_comp || "tci",
             fit: !!cfg.fit, holding: false,
             // the pair (P) and its left side (Sentinel-2)
@@ -1911,7 +2035,27 @@ def _(anywidget, asyncio, time, traitlets):
             if (st.gmode === "first") { keyEl.innerHTML = Array.from({length: y1 - y0 + 1}, (_, k) => y0 + k).map((y) => sw_(yrCol(y, y0, y1), y === y0 ? `${y} or before` : `${y}`)).join("") + `<span class="why">Only where a structure stands: the first year read in which half of it or more reads built (other built-up, road or building).</span>` + src + wsfK; return; }
             if (st.gmode === "earth" && st.area && areaSt) {
               const top = Math.round(100 * areaSt.topGlobal);
-              keyEl.innerHTML = `Unusual for this area, ${y0} to ${y1}: typical <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> most unusual<span class="why">Each hexagon against the rest of this area (A again for the normal scale): typical ground is the area's middle, full ink its top tenth of a percent. On the normal scale this area's top reaches <b>${top}%</b>${top < 5 ? ", so even its most unusual ground is quiet" : ""}.</span>`;
+              const k0 = st.areaFloor || 0, fl = AREA_FLOORS[k0], nF = AREA_FLOORS.length - 1;
+              const phrase = (f) => (f[1] === "middle" ? "middle" : f[1] + " (below it, quiet ground)");
+              keyEl.innerHTML = `<span class="at-afl-hd">Unusual for this area, ${y0} to ${y1}</span><span class="at-afl-lo">${fl[1]}</span> <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> most unusual`
+                + `<span class="at-afl"><span>Color from</span><span class="at-win at-afl-win"><span class="trk"></span><span class="spn"></span>`
+                + `<span class="tks">${AREA_FLOORS.map((f, k) => `<span><i class="${k === k0 ? "on" : ""}">${f[2]}</i></span>`).join("")}</span>`
+                + `<input type="range" min="0" max="${nF}" step="1" value="${k0}" aria-label="where the color starts"></span></span>`
+                + `<span class="why">Each hexagon against the rest of this area (A again for the normal scale): the color starts at the area's <span class="at-afl-ph">${phrase(fl)}</span>, full ink at its top tenth of a percent. Every area has a top, even where nothing was dug: a higher start keeps only its most unusual ground. On the normal scale this area's top reaches <b>${top}%</b>${top < 5 ? ", so even its most unusual ground is quiet" : ""}.</span>`;
+              // the inked part of the ramp: from the thumb to the right end
+              const spn = keyEl.querySelector(".at-afl-win .spn");
+              const place = (k) => { spn.style.left = `calc(8px + (100% - 16px) * ${k / nF})`; spn.style.right = "8px"; };
+              place(k0);
+              const rng = keyEl.querySelector(".at-afl input");
+              rng.oninput = (e) => {
+                e.stopPropagation();
+                const k = Number(rng.value), f = AREA_FLOORS[k];
+                st.areaFloor = k; recolorHex(); update(); place(k);
+                keyEl.querySelectorAll(".at-afl-win .tks i").forEach((t, j) => t.classList.toggle("on", j === k));
+                keyEl.querySelector(".at-afl-lo").textContent = f[1];
+                keyEl.querySelector(".at-afl-ph").textContent = phrase(f);
+              };
+              rng.onclick = rng.onpointerdown = (e) => e.stopPropagation();
               return;
             }
             if (st.gmode === "earth") { keyEl.innerHTML = `Ground moved, ${y0} to ${y1}: unlikely <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> likely<span class="why">The chance the ground itself was dug, filled or graded, from AlphaEarth's ${y0} and ${y1} by a model taught on 3DEP repeat lidar. Each hexagon shows its highest-scoring patch.</span>`; return; }
@@ -1952,13 +2096,26 @@ def _(anywidget, asyncio, time, traitlets):
           // stretched for the view, where the true color image clips bright ground
           const COMPS = [["tci", "True color", "Earth Genome's true color image"],
                          ["urban", "Urban", "B12 B11 B4 from the raw bands, each stretched to the view: built ground and bare soil apart by hue"],
-                         ["blueyellow", "Blue-yellow", "B11 B11 B2 from the raw bands, each stretched to the view: sand yellow, concrete blue"]];
+                         ["blueyellow", "Blue-yellow", "B11 B11 B2 from the raw bands, each stretched to the view: sand yellow, concrete blue"],
+                         // the indexes are drawn in the browser only (no kernel tiles for them)
+                         ...(cfg.s2_gpu !== false ? [
+                           ["ndbi", "NDBI", "(B11 - B8A) / (B11 + B8A), stretched to the view: built-up and bare ground orange, vegetation and water blue"],
+                           ["mineral", "Mineral", "Bare ground by its minerals, stretched to the view: iron oxides (B4 / B2) yellow, clays (B11 / B12) blue, vegetation and water dark"]] : [])];
           // what the hold card calls each, always shown while the imagery is up
-          const COMP_NAME = {tci: "True color (TCI)", urban: "False color: Urban (B12 B11 B4)", blueyellow: "False color: Blue-yellow (B11 B11 B2)"};
+          const COMP_NAME = {tci: "True color (TCI)", urban: "False color: Urban (B12 B11 B4)", blueyellow: "False color: Blue-yellow (B11 B11 B2)",
+                             ndbi: "NDBI: orange built-up or bare, blue vegetation or water", mineral: "Mineral: yellow iron oxides, blue clays, dark vegetation and water"};
           const compBox = el_("div");
           const styleComp = segOf(compBox, COMPS.map(([k, l, t]) => [k, l, t, ""]), (k) => k === st.s2comp, (k) => setComp(k));
-          function setComp(k) { st.s2comp = k; send("s2comp", {comp: k}); styleComp(); renderYear(); }
+          // new colors are new tiles: the year shown loads alone first again (s2Warm)
+          function setComp(k) { st.s2comp = k; s2Warm = false; send("s2comp", {comp: k}); styleComp(); renderYear(); }
           item("Imagery colors", "C steps them", compBox);
+          // the Earthwork models to compare (EW_MODELS in the kernel): current is the one the map ships with
+          const MODELS = cfg.models || ["current"];
+          st.model = cfg.model || "current";
+          const modelBox = el_("div");
+          const styleModel = segOf(modelBox, MODELS.map((k) => [k, k, k === "current" ? "models/earthwork-lr.npz" : `models/earthwork-lr-${k}.npz`, ""]), (k) => k === st.model, (k) => setModel(k));
+          function setModel(k) { st.model = k; send("model", {model: k}); styleModel(); say(`Earthwork model: ${k}`); }
+          if (MODELS.length > 1) item("Earthwork model", "M steps them", modelBox);
           const swLab = sw(() => st.labels, (v) => { st.labels = v; labels(v); });
           item("Place names", "", swLab);
           more.appendChild(el_("hr"));
@@ -2034,8 +2191,13 @@ def _(anywidget, asyncio, time, traitlets):
           let areaSt = null;  // the area scale's numbers for the frame (areaStats)
           let hexes = [], N = 0, res = -1, hexIndex = new Map(), hattrs = null, hmeta = {}, hcol = null, hcol32 = null, hexSeq = 0, hover = null, picked = null, imgPick = null;
           // THE AREA SCALE (A): each hexagon's Earthwork log-odds (3rd byte, -30..15 as 1..255) against the rest of
-          // the frame's hexagons, stretched from their median (no ink) to their top 0.1% (full ink); in log-odds
-          // so places the model scores ~0% everywhere still rank, and the top stays apart. topGlobal: the normal scale's value at that top
+          // the frame's hexagons, stretched from the floor (no ink) to their top 0.1% (full ink); in log-odds
+          // so places the model scores ~0% everywhere still rank, and the top stays apart. topGlobal: the normal scale's value at that top.
+          // THE FLOOR is a stepped slider in the key: the frame's median by default, or its top 25, 10, 5 or 1%. A
+          // frame where nothing was dug still has a top, so its ramp paints noise; a higher floor keeps only the
+          // frame's most unusual ground, with the whole ramp spread over it (at the lidar sites the top fifth of
+          // the ramp is mostly real digging, its middle mostly not)
+          const AREA_FLOORS = [[0.5, "middle", "Middle"], [0.75, "top 25%", "25%"], [0.9, "top 10%", "10%"], [0.95, "top 5%", "5%"], [0.99, "top 1%", "1%"]];
           function areaStats() {
             const hl = new Uint32Array(256), he = new Uint32Array(256);
             let n = 0;
@@ -2044,10 +2206,10 @@ def _(anywidget, asyncio, time, traitlets):
             const at = (h, q) => { let c = 0; for (let v = 1; v < 256; v++) { c += h[v]; if (c >= q * n) return v; } return 255; };
             const cdf = new Float32Array(256);
             for (let v = 1, c = 0; v < 256; v++) { c += hl[v]; cdf[v] = c / n; }
-            const med = at(hl, 0.5), top = Math.max(med + 1, at(hl, 0.999));
-            return {med, top, cdf, n, topGlobal: (at(he, 0.999) - 1) / 254};
+            const top = at(hl, 0.999), lo = Math.min(at(hl, AREA_FLOORS[st.areaFloor || 0][0]), top - 1);
+            return {lo, top, cdf, n, topGlobal: (at(he, 0.999) - 1) / 254};
           }
-          const areaT = (v) => (v ? Math.max(0, Math.min(1, (v - areaSt.med) / (areaSt.top - areaSt.med))) : 0);
+          const areaT = (v) => (v ? Math.max(0, Math.min(1, (v - areaSt.lo) / (areaSt.top - areaSt.lo))) : 0);
           // "top 2% of this area" for the hover and the card
           const areaWords = (i) => { if (!(st.area && areaSt)) return ""; const v = hattrs[HB * i + 2]; if (!v) return ""; const p = 100 * (1 - areaSt.cdf[v - 1]); return `; ${p < 1 ? "top " + (p < 0.1 ? "0.1" : p.toFixed(1)) + "%" : p <= 50 ? "top " + Math.round(p) + "%" : "lower half"} of this area`; };
           function recolorHex() {
@@ -2369,7 +2531,8 @@ def _(anywidget, asyncio, time, traitlets):
           // the footprints under the view (its STAC search, s2i); the browser opens each one's TCI COG
           // on data.source.coop and decodes its tiles in workers, so no tile waits on the kernel. The
           // year shown loads first, the other years once it is in (a scroll while holding is then
-          // instant). Yearly footprints paint over the fill ones. False colors stay on the kernel
+          // instant). Yearly footprints paint over the fill ones. The false colors too, from each
+          // footprint's raw band COGs; the kernel only takes their stretch for the view (cfg.s2_stretch)
           const S2GPU = cfg.s2_gpu !== false;
           const S2_WORKER = "https://esm.sh/@developmentseed/geotiff@0.8.0/es2022/dist/pool/worker.mjs";
           let s2Pool = null, s2Warm = false;
@@ -2392,6 +2555,7 @@ def _(anywidget, asyncio, time, traitlets):
               const getPriority = () => [year === st.imgYear ? 0 : 1, fill ? 1 : 0, near ? near() : 0];
               p = GeoTIFF.fromUrl(url, {concurrencyLimiter: s2Limiter, getPriority});
               s2Tiffs.set(url, p);
+              p.catch(() => { if (s2Tiffs.get(url) === p) s2Tiffs.delete(url); });  // a failed read is asked again next time
             }
             return p;
           };
@@ -2404,7 +2568,7 @@ def _(anywidget, asyncio, time, traitlets):
             return [W_ - dx, Math.max(-85, S_ - dy), E_ + dx, Math.min(85, N_ + dy)];
           }
           function s2Discover() {
-            if (!map || !S2GPU || st.s2comp !== "tci" || !(st.holding || st.pair || map.getZoom() >= 9)) return;
+            if (!map || !S2GPU || !(st.holding || st.pair || map.getZoom() >= 9)) return;
             const z = Math.max(cfg.s2_min_z || 7, Math.min(9, Math.floor(map.getZoom()))), n = 2 ** z;
             const tx = (lon) => Math.min(n - 1, Math.max(0, Math.floor((lon + 180) / 360 * n)));
             const ty = (lat) => { const v = Math.sin(lat * Math.PI / 180); return Math.min(n - 1, Math.max(0, Math.floor((0.5 - Math.log((1 + v) / (1 - v)) / (4 * Math.PI)) * n))); };
@@ -2423,7 +2587,7 @@ def _(anywidget, asyncio, time, traitlets):
                   for (const it of items) {
                     if (!it.bbox || e.ids.has(it.id)) continue;
                     e.ids.add(it.id);
-                    bt[it.fill ? "fill" : "yearly"].push({id: it.id, url: it.url, bbox: it.bbox});
+                    bt[it.fill ? "fill" : "yearly"].push({id: it.id, url: it.url, bbox: it.bbox, bands: it.bands || {}});
                     bt.bbox = [Math.min(bt.bbox[0], it.bbox[0]), Math.min(bt.bbox[1], it.bbox[1]), Math.max(bt.bbox[2], it.bbox[2]), Math.max(bt.bbox[3], it.bbox[3])];
                   }
                   if (bt.yearly.length || bt.fill.length) { e.batches.push(bt); update(); }
@@ -2476,6 +2640,184 @@ def _(anywidget, asyncio, time, traitlets):
             uniformTypes: {gamma: "f32"},
             getUniforms: (q) => ({gamma: q.gamma}),
           };
+          // ---- the false colors (S2_COMPOSITES in the kernel): R, G, B from the raw bands (uint16
+          // reflectance x 10,000). The layer walks the first 20 m band's tiles; each other band is read
+          // at the level of the same pixel size and placed by its own geotransform (the yearly
+          // footprints share one grid for every band, the fill ones put the 10 m bands on another
+          // origin and other blocks), from the blocks under the tile. Packed as sqrt(reflectance) in
+          // 8 bits (fine steps in the dark ground, where most of it lies); nodata (a band at 0) gets
+          // alpha 0 as in TCI
+          // rgb: three bands, each over its stretch (S2Stretch). bands + q: quantities computed here per
+          // pixel (the kernel's S2_INDEXES computes the same ones for the stretch), kept as half floats
+          // and colored by S2Index (kind 0: one index on a ramp, 1: mineral)
+          const s2Clamp = (x) => Math.min(1, Math.max(0, x));
+          const s2Bare = (b3, b4, b11, b8a) => s2Clamp((0.45 - (b8a - b4) / (b8a + b4)) / 0.25) * s2Clamp((0.05 - (b3 - b11) / (b3 + b11)) / 0.15);
+          const S2_FALSE = {
+            urban: {rgb: ["B12", "B11", "B04"]},
+            blueyellow: {rgb: ["B11", "B11", "B02"]},
+            ndbi: {bands: ["B11", "B8A"], kind: 0, q: (v, o) => { o[0] = (v[0] - v[1]) / (v[0] + v[1]); o[1] = o[2] = 0; }},
+            mineral: {bands: ["B02", "B03", "B04", "B11", "B12", "B8A"], kind: 1,
+                      q: (v, o) => { o[0] = v[2] / v[0]; o[1] = v[3] / v[4]; o[2] = s2Bare(v[1], v[2], v[3], v[5]); }},
+          };
+          const S2_20M = new Set(["B11", "B12", "B8A"]);
+          const s2BandsOf = (comp) => S2_FALSE[comp].rgb || S2_FALSE[comp].bands;
+          const s2Prim = (comp) => s2BandsOf(comp).find((b) => S2_20M.has(b));
+          // float -> half float bits (rgba16float takes them as a Uint16Array)
+          const s2F32 = new Float32Array(1), s2U32 = new Uint32Array(s2F32.buffer);
+          function s2Half(v) {
+            s2F32[0] = v;
+            const x = s2U32[0], sg = (x >>> 16) & 0x8000, e = ((x >>> 23) & 0xff) - 112;
+            if (e <= 0 || v !== v) return sg;
+            if (e >= 31) return sg | 0x7bff;
+            return sg | (e << 10) | ((x & 0x7fffff) >>> 13);
+          }
+          const S2_HALF_ONE = s2Half(1);
+          const S2_SQRT = new Uint8Array(65536);
+          for (let v = 0; v < 65536; v++) S2_SQRT[v] = Math.round(255 * Math.sqrt(Math.min(v, 10000) / 10000));
+          // a block on another grid lies under up to four tiles: read once for all of them (no
+          // tile's abort signal, so one tile let go does not fail its neighbors)
+          const s2Blocks = new Map();
+          function s2Block(url, im, bx, by, pool) {
+            const k = `${url}|${im.width}|${bx}|${by}`;
+            let p = s2Blocks.get(k);
+            if (!p) {
+              p = im.fetchTile(bx, by, {boundless: false, pool}).then(({array}) => ({d: array.data || array.bands[0], w: array.width, h: array.height}), () => null);
+              s2Blocks.set(k, p);
+              if (s2Blocks.size > 256) s2Blocks.delete(s2Blocks.keys().next().value);
+            }
+            return p;
+          }
+          async function s2BandTileData(image, {device, x, y, signal, pool}, key, geotiff, src, comp, year, fill) {
+            const sy = s2Stat.years[key] || (s2Stat.years[key] = {tiles: 0, pending: 0, last: 0});
+            s2Stat.pending++; sy.pending++;
+            try {
+              const spec = S2_FALSE[comp], bands = s2BandsOf(comp), prim = s2Prim(comp);
+              const tp = image.transform, tw = image.tileWidth, th = image.tileHeight;
+              const X0 = tp[2] + x * tw * tp[0], Y0 = tp[5] + y * th * tp[4];  // the tile's corner, in meters
+              const block = async (im, bx, by) => {
+                try {
+                  const {array} = await im.fetchTile(bx, by, {boundless: false, pool, signal});
+                  return {d: array.data || array.bands[0], w: array.width, h: array.height};
+                } catch (e) { if (signal && signal.aborted) throw e; return null; }  // no block there
+              };
+              const one = async (b) => {
+                if (b === prim) return block(image, x, y);
+                const g = src.bands[b] ? await s2Tiff(src.bands[b], null, year, fill) : null;
+                const im = g && [g, ...g.overviews].find((q) => Math.abs(q.transform[0] / tp[0] - 1) < 0.01);
+                if (!im) return null;
+                const q = im.transform, c0 = Math.round((X0 - q[2]) / q[0]), r0 = Math.round((Y0 - q[5]) / q[4]);
+                const bw = im.tileWidth, bh = im.tileHeight;
+                if (bw === tw && bh === th && c0 === x * tw && r0 === y * th) return block(im, x, y);
+                const out = new Uint16Array(tw * th), jobs = [];
+                for (let by = Math.max(0, Math.floor(r0 / bh)); by <= Math.min(Math.ceil(im.height / bh) - 1, Math.floor((r0 + th - 1) / bh)); by++)
+                  for (let bx = Math.max(0, Math.floor(c0 / bw)); bx <= Math.min(Math.ceil(im.width / bw) - 1, Math.floor((c0 + tw - 1) / bw)); bx++)
+                    jobs.push(s2Block(src.bands[b], im, bx, by, pool).then((t) => {
+                      if (!t) return;
+                      // the block's pixels in the tile's frame
+                      const ox = bx * bw - c0, oy = by * bh - r0;
+                      for (let r = Math.max(0, -oy); r < t.h && r + oy < th; r++) {
+                        const c = Math.max(0, -ox), n = Math.min(t.w, tw - ox) - c;
+                        if (n > 0) out.set(t.d.subarray(r * t.w + c, r * t.w + c + n), (r + oy) * tw + c + ox);
+                      }
+                    }));
+                await Promise.all(jobs);
+                return {d: out, w: tw, h: th};
+              };
+              const ub = [...new Set(bands)], got = new Map(await Promise.all(ub.map(async (b) => [b, await one(b)])));
+              const p = got.get(prim);
+              if (!p) throw new Error("no " + prim + " tile");
+              const {w: width, h: height} = p, chans = bands.map((b) => got.get(b));
+              if (spec.q) {
+                // the quantities as half floats, times alpha (0 at nodata, so the filter's blend at an
+                // edge divides back out as in TCI)
+                const px = new Uint16Array(4 * width * height), v = new Float32Array(bands.length), q = new Float32Array(3);
+                if (chans.every(Boolean)) {
+                  for (let r = 0; r < height; r++) for (let c = 0; c < width; c++) {
+                    let ok = true;
+                    for (let k = 0; k < bands.length; k++) {
+                      const a = chans[k], x = r < a.h && c < a.w ? a.d[r * a.w + c] : 0;
+                      if (!x) { ok = false; break; }
+                      v[k] = x;
+                    }
+                    if (!ok) continue;
+                    spec.q(v, q);
+                    const o = 4 * (r * width + c);
+                    px[o] = s2Half(q[0]); px[o + 1] = s2Half(q[1]); px[o + 2] = s2Half(q[2]); px[o + 3] = S2_HALF_ONE;
+                  }
+                }
+                s2Stat.tiles++; sy.tiles++;
+                return {texture: device.createTexture({data: px, format: "rgba16float", width, height, sampler: {magFilter: "linear", minFilter: "linear"}}), width, height};
+              }
+              const rgba = new Uint8Array(4 * width * height);
+              if (chans.every(Boolean)) {
+                for (let r = 0; r < height; r++) for (let c = 0; c < width; c++) {
+                  const o = 4 * (r * width + c);
+                  let ok = true;
+                  for (let k = 0; k < 3; k++) {
+                    const a = chans[k], v = r < a.h && c < a.w ? a.d[r * a.w + c] : 0;
+                    if (!v) { ok = false; break; }
+                    rgba[o + k] = S2_SQRT[v];
+                  }
+                  if (ok) rgba[o + 3] = 255; else rgba[o] = rgba[o + 1] = rgba[o + 2] = 0;
+                }
+              }
+              s2Stat.tiles++; sy.tiles++;
+              return {texture: device.createTexture({data: rgba, format: "rgba8unorm", width, height, sampler: {magFilter: "linear", minFilter: "linear"}}), width, height};
+            } catch (e) {
+              if (!(signal && signal.aborted)) s2Stat.failed++;
+              throw e;
+            } finally {
+              s2Stat.pending--; sy.pending--;
+              s2Stat.last = sy.last = Date.now();
+              if (!s2Warm && s2Stat.pending === 0) { s2Warm = true; setTimeout(update, 250); }
+            }
+          }
+          // as S2Look, then back from sqrt to reflectance and each band over its stretch (the
+          // kernel's 98th percentile for the view, as a fraction), then the gamma
+          const S2Stretch = {
+            name: "s2Stretch",
+            fs: `uniform s2StretchUniforms {
+  float gamma;
+  vec3 scale;
+} s2Stretch;
+`,
+            inject: {"fs:DECKGL_FILTER_COLOR": `
+  if (color.a < 0.5) discard;
+  vec3 v = color.rgb / color.a;
+  v = clamp(v * v / s2Stretch.scale, 0.0, 1.0);
+  color = vec4(pow(v, vec3(1.0 / s2Stretch.gamma)), 1.0);
+`},
+            uniformTypes: {gamma: "f32", scale: "vec3<f32>"},
+            getUniforms: (q) => ({gamma: q.gamma, scale: q.scale}),
+          };
+          // the indexes: each quantity over its stretch (the kernel's 2nd to 98th percentile for the view).
+          // NDBI on blue (low: vegetation, water) to a light middle to orange (high: built-up, bare).
+          // Mineral: iron oxides yellow, clays blue, both near white, on bare ground; vegetation dark.
+          // Blue against yellow and orange, never red against green
+          const S2Index = {
+            name: "s2Index",
+            fs: `uniform s2IndexUniforms {
+  vec3 lo;
+  vec3 hi;
+  float kind;
+} s2Index;
+`,
+            inject: {"fs:DECKGL_FILTER_COLOR": `
+  if (color.a < 0.5) discard;
+  vec3 q = color.rgb / color.a;
+  vec3 t = clamp((q - s2Index.lo) / max(s2Index.hi - s2Index.lo, vec3(1e-6)), 0.0, 1.0);
+  vec3 c;
+  if (s2Index.kind < 0.5) {
+    vec3 lo = vec3(0.13, 0.33, 0.62), mid = vec3(0.95, 0.93, 0.88), hi = vec3(0.89, 0.47, 0.08);
+    c = t.r < 0.5 ? mix(lo, mid, t.r * 2.0) : mix(mid, hi, t.r * 2.0 - 1.0);
+  } else {
+    c = vec3(0.05, 0.06, 0.07) + t.b * (vec3(0.10) + t.r * vec3(0.95, 0.76, 0.18) + t.g * vec3(0.22, 0.50, 0.92));
+  }
+  color = vec4(clamp(c, 0.0, 1.0), 1.0);
+`},
+            uniformTypes: {lo: "vec3<f32>", hi: "vec3<f32>", kind: "f32"},
+            getUniforms: (q) => ({lo: q.lo, hi: q.hi, kind: q.kind}),
+          };
           const s2CogLayers = (year, left = false) => {
             if (!s2Pool) s2Pool = new DecoderPool({size: Math.min(6, navigator.hardwareConcurrency || 4),
               createWorker: () => new Worker(URL.createObjectURL(new Blob([`import "${S2_WORKER}";`], {type: "text/javascript"})), {type: "module"})});
@@ -2486,20 +2828,34 @@ def _(anywidget, asyncio, time, traitlets):
             // reaches them, so a tile loaded while holding stayed after the hold), while deck.gl checks
             // every parent's visible on each draw. Hidden years still load their tiles
             const visible = (left ? st.pair && st.left === "s2" : st.holding) && year === st.imgYear;
-            const gamma = Number(st.s2scale) || 1, pre = (left ? "s2gl-" : "s2g-");
+            const gamma = Number(st.s2scale) || 1, comp = S2_FALSE[st.s2comp] ? st.s2comp : "tci";
+            const pre = (left ? "s2gl-" : "s2g-") + (comp === "tci" ? "" : comp + "-");
+            // the false colors wait, still loading, for the stretch of their view
+            const sx = cfg.s2_stretch, stretched = comp === "tci" || (sx && sx.comp === comp);
+            const spec = S2_FALSE[comp];
+            const scale = !spec || !spec.rgb ? null : spec.rgb.map((b) => ((sx && sx[b]) || 3000) / 10000);
+            const lo = (sx && sx.lo) || [0, 0, 0], hi = (sx && sx.hi) || [1, 1, 1];
+            const look = !spec ? null : spec.rgb ? {module: S2Stretch, props: {gamma, scale}} : {module: S2Index, props: {lo, hi, kind: spec.kind}};
             const [W_, S_, E_, N_] = s2View();
             const live = e.batches.filter((bt) => bt.bbox[0] < E_ && bt.bbox[2] > W_ && bt.bbox[1] < N_ && bt.bbox[3] > S_);
             // every batch's fill under every batch's yearly footprints
             const parts = [...live.filter((bt) => bt.fill.length).map((bt) => [bt, "fill"]), ...live.filter((bt) => bt.yearly.length).map((bt) => [bt, "yearly"])];
             return parts.map(([bt, part]) => new MosaicLayer({
-              id: pre + bt.key + "-" + part, sources: bt[part], maxCacheSize: 0, minZoom: cfg.s2_min_z || 7, visible, beforeId: slot(left ? map2 : map),
-              getSource: (src, o) => s2Tiff(src.url, o, year, part === "fill"),
-              onSourceError: () => {},  // a footprint the STAC lists but the bucket lacks: nothing there
-              renderSource: (src, {data, signal}) => new COGLayer({
+              id: pre + bt.key + "-" + part, sources: bt[part], maxCacheSize: 0, minZoom: cfg.s2_min_z || 7, visible: visible && stretched, beforeId: slot(left ? map2 : map),
+              // a footprint that cannot be read (the STAC lists it but the bucket lacks it, or its header
+              // failed) is nothing there: a rejection here leaves MosaicLayer a tile with no content,
+              // which it then cannot draw ("Cannot destructure property 'source' ... null")
+              getSource: (src, o) => s2Tiff(comp === "tci" ? src.url : src.bands[s2Prim(comp)], o, year, part === "fill").catch(() => null),
+              renderSource: (src, {data, signal}) => !data ? null : comp === "tci" ? new COGLayer({
                 id: pre + year + "-" + src.id, geotiff: data, getTileData: (img, o) => s2TileData(img, o, year + (part === "fill" ? " fill" : "")), pool: s2Pool, signal,
                 refinementStrategy: "best-available", maxRequests: 16,
                 renderTile: (d) => ({renderPipeline: [{module: CreateTexture, props: {textureName: d.texture}}, {module: S2Look, props: {gamma}}]}),
                 updateTriggers: {renderTile: [gamma]},
+              }) : new COGLayer({
+                id: pre + year + "-" + src.id, geotiff: data, pool: s2Pool, signal, refinementStrategy: "best-available", maxRequests: 16,
+                getTileData: (img, o) => s2BandTileData(img, o, comp + " " + year + (part === "fill" ? " fill" : ""), data, src, comp, year, part === "fill"),
+                renderTile: (d) => ({renderPipeline: [{module: CreateTexture, props: {textureName: d.texture}}, look]}),
+                updateTriggers: {renderTile: [gamma, ...(scale || []), ...lo, ...hi]},
               }),
             }));
           };
@@ -2516,12 +2872,7 @@ def _(anywidget, asyncio, time, traitlets):
             opacity: (left ? st.pair && st.left === "s2" : st.holding) && year === st.imgYear ? 1 : 0,
             renderSubLayers: (p) => { if (!p.data) return null; const {west, south, east, north} = p.tile.bbox; return new BitmapLayer(p, {data: null, image: p.data, bounds: [west, south, east, north]}); },
           });
-          // the hexagons: tiles of cell numbers from the kernel (1 + the row in
-          // this frame, 0 none), colored here from hcol, so a mode or window
-          // change repaints without a round trip. A tile from an older frame
-          // keeps its last picture until the new frame's tile replaces it.
-          const unz = async (u8) => new Uint32Array(await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
-          // hexagon edges drawn from the H3 boundary, not the tile's pixels
+          // the model's res 13 tiles: hexagon edges drawn from the H3 boundary, not the tile's pixels
           //. The tile says which hexagons are near a pixel (its
           // 3x3 texels, as local indices); each one's ring (h3-js
           // cellToBoundary, in tile pixel units) gives the fragment's signed
@@ -2609,76 +2960,19 @@ def _(anywidget, asyncio, time, traitlets):
             }
           }
           HexEdgeLayer.layerName = "HexEdgeLayer";
-          const ptimes = [];  // per hexagon tile painted, for the tests
-          // once per tile and frame: the tile's hexagons as local indices (1 +,
-          // 0 none) and their rings in tile pixels; the colors per repaint
-          function tilePic(d) {
-            if (d.seq !== hmeta.seq || !hcol32) return d.col ? d : null;  // an older frame's tile keeps its last picture
-            if (d.col && d.cseq === hexSeq) return d;
-            const tp = performance.now();
-            if (!d.pic) {
-              const n = d.side, ids = d.ids, loc = new Map(), rows = [], idx = new Uint8Array(2 * n * n);
-              let last = 0, lastL = 0;
-              for (let i = 0; i < ids.length; i++) {
-                const k = ids[i];
-                if (!k) continue;
-                if (k !== last) { const l = loc.get(k); if (l === undefined) { lastL = rows.length; loc.set(k, lastL); rows.push(k - 1); } else lastL = l; last = k; }
-                const v = Math.min(lastL + 1, 65535);
-                idx[2 * i] = v & 255; idx[2 * i + 1] = v >> 8;
-              }
-              const K = rows.length, gh = Math.max(1, Math.ceil(K / GEO_W)), geo = new Float32Array(5 * GEO_W * gh * 4);
-              const Z = 2 ** d.z, lonC = (d.x + 0.5) / Z * 360 - 180;
-              for (let j = 0; j < K; j++) {
-                const r = ring(hexes[rows[j]]);
-                if (!r) continue;
-                const m = Math.min(10, r.length - 1), o = (Math.floor(j / GEO_W) * 5 * GEO_W + 5 * (j % GEO_W)) * 4;
-                for (let q = 0; q < 10; q++) {
-                  let [lng, lat] = r[Math.min(q, m - 1)];
-                  if (lng - lonC > 180) lng -= 360; else if (lng - lonC < -180) lng += 360;
-                  const sn = Math.sin(lat * Math.PI / 180);
-                  geo[o + 2 * q] = ((lng + 180) / 360 * Z - d.x) * n;
-                  geo[o + 2 * q + 1] = ((0.5 - Math.log((1 + sn) / (1 - sn)) / (4 * Math.PI)) * Z - d.y) * n;
-                }
-              }
-              d.pic = {n, idx, geo, gh, rows};
-            }
-            const rows = d.pic.rows, col = new Uint8Array(COL_W * Math.max(1, Math.ceil(rows.length / COL_W)) * 4), c32 = new Uint32Array(col.buffer);
-            for (let j = 0; j < rows.length; j++) c32[j] = hcol32[rows[j]];
-            d.col = col; d.cseq = hexSeq;
-            ptimes.push({t: Date.now(), ms: performance.now() - tp, unz: d.unz, ready: d.done}); if (ptimes.length > 4000) ptimes.splice(0, 1000);
-            return d;
-          }
-          // one layer per frame. A new frame loads hidden behind the one on screen and replaces it
-          // whole once every tile in view is in (or after HEX_SWAP_MS), so two frames' hexagons
-          // (often two resolutions) never show side by side; tile by tile, each old tile stayed until
-          // its new one came in. "no-overlap": within a frame, a zoom's coarser tiles never show
-          // through finer ones
-          const HEX_SWAP_MS = 8000;
-          let shownSeq = 0, swapT = null, swapFor = 0;
-          let repaintQ = false;
-          const repaintSoon = () => { if (repaintQ) return; repaintQ = true; requestAnimationFrame(() => { repaintQ = false; for (const m of [map, map2]) if (m) m.triggerRepaint(); }); };
-          const showFrame = (seq) => { if (seq !== hmeta.seq || seq === shownSeq) return; clearTimeout(swapT); swapT = null; swapFor = 0; shownSeq = seq; update(); };
-          const hexLayer = (visible, seq, onViewportLoad) => new TileLayer({
-            id: "hexes-" + seq, visible, onViewportLoad,
-            getTileData: async ({index, signal}) => {
-              const u8 = await ask("hex", seq, index, signal);
-              // deck draws inside MapLibre's frames (interleaved): a tile that lands while the map is still
-              // asks for no frame, so nothing showed it (and the next frame never swapped in) until a move.
-              // Asked once the tile is decoded, so the frame finds it in place
-              if (!u8) { repaintSoon(); return null; }
-              const t0 = performance.now(), ids = await unz(u8);
-              repaintSoon();
-              return {ids, seq, side: Math.round(Math.sqrt(ids.length)), z: index.z, x: index.x, y: index.y, unz: performance.now() - t0, done: Date.now()};
-            },
-            onTileError: (e) => { if (!e || (e.name !== "AbortError" && !/stale/.test(e.message || ""))) say("hexagon tile: " + ((e && e.message) || e)); },
-            tileSize: 256, minZoom: Math.floor(HEXZ), maxZoom: 17, refinementStrategy: "no-overlap", debounceTime: 60, beforeId: slot(),
-            updateTriggers: {renderSubLayers: [seq === hmeta.seq ? hexSeq : -1]},
-            renderSubLayers: (p) => {
-              const t = p.data ? tilePic(p.data) : null;
-              if (!t) return null;
-              const {west, south, east, north} = p.tile.bbox;
-              return new HexEdgeLayer(p, {data: null, image: null, pic: t.pic, col: t.col, bounds: [west, south, east, north]});
-            },
+          // the hexagons: the frame's cells drawn as geometry, colored from hcol. A zoom or pan only
+          // rescales what is on screen (nothing to fetch per tile), and a new frame replaces the old
+          // one whole the moment its cells arrive. hexData is made once per frame, so a hover or a
+          // mode change does not rebuild the shapes
+          let hexData = null;
+          const hexLayer = (visible) => new H3HexagonLayer({
+            id: "hexes", visible,
+            data: hexData,
+            getHexagon: (_, {index}) => hexes[index],
+            getFillColor: (_, {index, target}) => { const o = 4 * index; target[0] = hcol[o]; target[1] = hcol[o + 1]; target[2] = hcol[o + 2]; target[3] = hcol[o + 3]; return target; },
+            updateTriggers: {getFillColor: [hexSeq]},
+            filled: true, stroked: false, extruded: false, highPrecision: true, pickable: false,
+            beforeId: slot(),
           });
           // ---- the model's res 13 (res 12 under zoom 14), from zoom OTF13_Z: tiles of the store's own cells (the
           // kernel sends each tile's cells, 8 bytes each, and every pixel's local cell), drawn
@@ -2746,30 +3040,20 @@ def _(anywidget, asyncio, time, traitlets):
           function layers() {
             const out = [];
             const z = map ? map.getZoom() : 0;
-            // preloaded from zoom 9 only: below it the tiles are decimated from L5 (slow). True color
-            // keeps every year mounted (cheap tiles, a scroll is instant); a false color tile reads three
-            // bands, so only the year shown is mounted and loads first. Paired, the imagery is the
-            // left map's, so none here
+            // preloaded from zoom 9 only: below it the tiles are decimated from L5 (slow). Every year
+            // stays mounted (the one shown loads first, a scroll is instant); the kernel's tiles (no
+            // GPU path) keep only the year shown for false colors, which read three bands. Paired,
+            // the imagery is the left map's, so none here
             if (!st.pair && (st.holding || z >= 9)) {
-              if (S2GPU && st.s2comp === "tci") { s2Discover(); for (const y of s2Years()) out.push(...s2CogLayers(y)); }
+              if (S2GPU) { s2Discover(); for (const y of s2Years()) out.push(...s2CogLayers(y)); }
               else for (const y of S2Y) if (st.s2comp === "tci" || y === st.imgYear) out.push(s2Layer(y));
             }
             // while holding: the imagery, and over it only the two outlines
             //
-            // kept in the stack while hidden (holding, zoomed out) so its tiles stay cached
+            // kept in the stack while hidden (holding, zoomed out) so its shapes stay built
             // the model's res 13 from OTF13_Z where it has run; the frame's hexagons otherwise
             const res13 = MODEL_MODES.includes(st.gmode) && !!hmeta.otf && z >= OTF13_Z;
-            // the frame's colors (hcol) come a moment after its cells, so whether the hexagons are on
-            // screen is judged without them
-            const hexShow = !st.holding && !res13 && z >= HEXZ, hexOn = hexShow && !!hcol;
-            // nothing on screen to keep (the first frame, or the hexagons hidden): the new frame shows as it loads
-            if (hmeta.seq && (!shownSeq || !hexShow)) shownSeq = hmeta.seq;
-            if (hmeta.seq && shownSeq !== hmeta.seq) {
-              const s = hmeta.seq;
-              if (swapFor !== s) { clearTimeout(swapT); swapFor = s; swapT = setTimeout(() => showFrame(s), HEX_SWAP_MS); }
-              out.push(hexLayer(hexShow, shownSeq));
-              out.push(hexLayer(false, s, () => showFrame(s)));
-            } else if (hmeta.seq) out.push(hexLayer(hexOn, hmeta.seq));
+            if (hexData && hcol) out.push(hexLayer(!st.holding && !res13 && z >= HEXZ));
             if (hmeta.otf) out.push(otf13Layer(!st.holding && res13));
             const hv = hover != null && hover >= 0 ? outline("hover", hexes[hover], [255, 255, 255, 235], 2) : null;
             if (hv) out.push(hv);
@@ -2786,7 +3070,7 @@ def _(anywidget, asyncio, time, traitlets):
           function layers2() {
             if (!st.pair || !map2) return [];
             let out;
-            if (S2GPU && st.s2comp === "tci") { s2Discover(); out = s2Years().flatMap((y) => s2CogLayers(y, true)); }
+            if (S2GPU) { s2Discover(); out = s2Years().flatMap((y) => s2CogLayers(y, true)); }
             else out = S2Y.filter((y) => st.s2comp === "tci" || y === st.imgYear).map((y) => s2Layer(y, true));
             const hv = hover != null && hover >= 0 ? outline("hover-l", hexes[hover], [255, 255, 255, 235], 2, map2) : null;
             if (hv) out.push(hv);
@@ -3069,6 +3353,7 @@ def _(anywidget, asyncio, time, traitlets):
             else if (k === "l" || k === "L") { st.labels = !st.labels; labels(st.labels); swLab.sty(); }
             else if (k === "x" || k === "X") { st.fit = !st.fit; sizes(); }
             else if (k === "c" || k === "C") { const i = COMPS.findIndex(([c]) => c === st.s2comp); setComp(COMPS[(i + 1) % COMPS.length][0]); }
+            else if ((k === "m" || k === "M") && MODELS.length > 1) setModel(MODELS[(MODELS.indexOf(st.model) + 1) % MODELS.length]);
             // full screen (the browser's own; Esc or F again leaves it), filling the window inside it
             else if (k === "f" || k === "F") {
               if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -3103,7 +3388,7 @@ def _(anywidget, asyncio, time, traitlets):
             map = new maplibregl.Map({container: mapEl, style: STYLE, center: [home.longitude, home.latitude], zoom: home.zoom, attributionControl: {compact: true}});
             map.keyboard.disable();
             map.doubleClickZoom.enable();
-            root._otf = {map, st, hmeta: () => hmeta, area: () => areaSt, hexShown: () => shownSeq, tiles: () => tlog, s2: () => ({...s2Stat, warm: s2Warm, sources: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.ids.size])), batches: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.batches.length]))})};  // for headless tests
+            root._otf = {map, st, cfg: () => cfg, hmeta: () => hmeta, area: () => areaSt, hexShown: () => (hexData && hcol ? hmeta.seq : 0), tiles: () => tlog, s2: () => ({...s2Stat, warm: s2Warm, sources: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.ids.size])), batches: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.batches.length]))})};  // for headless tests
             map.addControl(new maplibregl.NavigationControl({showCompass: false}), "bottom-left");
             ov = new MapboxOverlay({interleaved: true, layers: [], onError: (e) => say("deck: " + (e && e.message ? e.message : e))});
             map.addControl(ov);
@@ -3120,7 +3405,7 @@ def _(anywidget, asyncio, time, traitlets):
             map.on("moveend", sendView);
             // a new view: the footprints under it asked for
             // (and the batches near it mounted, the far ones let go)
-            map.on("moveend", () => { if (S2GPU && st.s2comp === "tci") { s2Discover(); update(); } });
+            map.on("moveend", () => { if (S2GPU) { s2Discover(); update(); } });
             map.on("zoomend", () => { update(); renderYear(); styleKey(); });
             // a zoom in crossing 8.3 (the kernel's _AHEAD_ZOOM) tells the kernel
             // at once, so it starts reading before the hexagons' zoom
@@ -3144,7 +3429,7 @@ def _(anywidget, asyncio, time, traitlets):
             window.__cmMaps = () => [map];
             window.__cmState = () => ({st: Object.assign({}, st), hex: N, res, hmeta, tiles: tstat, card: cardData, status: model.get("status"),
               lc: hattrs ? Array.from({length: N}, (_, i) => hattrs[HB * i + 7]).reduce((c, v) => (c[v]++, c), [0, 0, 0, 0]) : null});
-            window.__cmTiles = () => ({log: tlog, paints: ptimes, frames: flog});
+            window.__cmTiles = () => ({log: tlog, frames: flog});
             // for tests: the center of the first hexagon whose biggest step is year y and that moved a fair amount
             window.__cmHexAt = (y) => { const b = map.getBounds(); for (let i = 0; i < N; i++) if (hattrs && hattrs[HB * i] === y - 2000 && hattrs[HB * i + 1] >= FAIR) { const r = cellToBoundary(hexes[i], true); const c = r.slice(0, -1).reduce((a, p) => [a[0] + p[0] / (r.length - 1), a[1] + p[1] / (r.length - 1)], [0, 0]); if (b.contains(c) && map.project(c).x < mapEl.clientWidth - 420 && map.project(c).y > 200) return c; } return null; };
           }
@@ -3162,12 +3447,13 @@ def _(anywidget, asyncio, time, traitlets):
             if (kindsWait()) st.want = "much";
             st.gmode = drawnMode();
             styleFill();
-            if (!cb || !cb.length) { hexes = []; N = 0; hexIndex = new Map(); res = -1; hattrs = null; hcol = null; hcol32 = null; renderYear(); styleKey(); update(); return; }
+            if (!cb || !cb.length) { hexes = []; N = 0; hexIndex = new Map(); res = -1; hattrs = null; hcol = null; hcol32 = null; hexData = null; renderYear(); styleKey(); update(); return; }
             const ids = new BigUint64Array(copyOf(cb));
             N = ids.length; hexes = new Array(N); hexIndex = new Map();
             for (let i = 0; i < N; i++) { const h = ids[i].toString(16); hexes[i] = h; hexIndex.set(h, i); }
             try { res = getResolution(hexes[0]); } catch (e) { res = -1; }
             hattrs = ab && ab.length === HB * N ? new Uint8Array(copyOf(ab)) : null;
+            hexData = {length: N};
             hover = null;
             recolorHex(); renderYear(); styleKey(); update();
             flog.push({seq: hmeta.seq, n: N, t: Date.now(), ms: performance.now() - tl});
@@ -3227,6 +3513,7 @@ def _(
     ALPHA_FILL,
     ALPHA_QUIET,
     ChangeMap,
+    EW_MODELS,
     HEX_ZOOM,
     HOLD_MS,
     HOLD_SLOP_PX,
@@ -3264,13 +3551,14 @@ def _(
         "res_ladder": [ZOOM0, PER_RES, BASE_RES, MAX_RES],
         # true color read and drawn in the browser (deck.gl-raster); False: the kernel's PNG tiles
         "s2_gpu": True,
+        "models": list(EW_MODELS), "model": "current",
     }))
     HOLD = {
-        "frame": None, "frames": {}, "sent": None, "box": None, "res": None, "vs": None,
+        "frame": None, "sent": None, "box": None, "res": None, "vs": None,
         "busy": False, "pending": None, "pending_force": False, "task": None, "loop": None,
         "s2scale": S2_SCALE0, "s2gen": 0, "y0": AEF_FROM0, "y1": AEF_TO0,
         "hit": None, "pick_n": None, "card": None, "memo": {}, "aef": {},
-        "h_cam": None, "h_ctl": None, "h_pick": None, "runs": 0, "hex_status": "", "place": None,
+        "h_cam": None, "h_ctl": None, "h_pick": None, "runs": 0, "hex_status": "", "place": None, "model": "current",
     }
     cmap
     return HOLD, cmap
@@ -3280,8 +3568,8 @@ def _(
 def _(
     AEF_YEARS_ALL,
     CARRY_RES,
+    EW_MODELS,
     CELL_KM2,
-    HEX_TILE_PX,
     LOGIT_HI,
     LOGIT_LO,
     HEX_UP,
@@ -3294,23 +3582,21 @@ def _(
     build_frame,
     cmap,
     contains,
-    coordinates_to_cells,
     cpu,
     division_at,
     json,
     np,
-    pa,
     pad_box,
     re,
     res_for_view,
     s2_items_json,
     s2_set_composite,
     s2_set_scale,
+    s2_stretch,
     s2_tile_png,
     time,
     traceback,
     view_to_bbox,
-    zlib,
 ):
     # ---- wiring: the camera loop, the click and the controls. Re-runs freely. -----
     try:
@@ -3321,43 +3607,9 @@ def _(
     # one frame build at a time: they share the DuckDB connection's registered tables
     HOLD.setdefault("build_lock", asyncio.Lock())
 
-    def _hex_tile(fr, z, x, y):
-        """A map tile of the frame's hexagons as cell numbers: HEX_TILE_PX a
-        side, each pixel 1 + the frame row of the hexagon its center falls in
-        (0 none), uint32 little-endian, deflated. The browser colors it."""
-        T, n = HEX_TILE_PX, 2 ** z
-        f = (np.arange(T) + 0.5) / T
-        lon = (x + f) / n * 360.0 - 180.0
-        lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + f) / n))))
-        LON, LAT = np.meshgrid(lon, lat)
-        c = pa.array(coordinates_to_cells(LAT.ravel(), LON.ravel(), fr["res"])).to_numpy(zero_copy_only=False).astype(np.uint64)
-        ids = fr["cellid"]
-        if not len(ids):
-            return None
-        i = np.clip(np.searchsorted(ids, c), 0, len(ids) - 1)
-        hit = ids[i] == c
-        if not hit.any():
-            return None
-        return zlib.compress(np.where(hit, i + 1, 0).astype("<u4").tobytes(), 1)
-
     async def _tile_fn(src, z, x, y, year):
         t0 = time.time()
-        if src == "hex":
-            fr = HOLD["frames"].get(year)
-            if fr is None:
-                raise RuntimeError("stale hexagon frame")
-            ts = {}
-
-            def _job():
-                ts["s"] = time.time()
-                r = _hex_tile(fr, z, x, y)
-                ts["e"] = time.time()
-                return r
-
-            out = await cpu(_job)
-            cmap.tile_times[(src, z, x, y, year)] = {"wait": 1e3 * (ts["s"] - t0), "run": 1e3 * (ts["e"] - ts["s"])}
-            return out
-        elif src == "s2i":
+        if src == "s2i":
             out = await s2_items_json(z, x, y, year)
         else:
             out = await s2_tile_png(z, x, y, year)
@@ -3454,7 +3706,7 @@ def _(
         fres = min(13, res + CARRY_RES)
         y0, y1 = HOLD["y0"], HOLD["y1"]
         rbox = tuple(round(v, 3) for v in box)
-        key = (y0, y1, res, rbox)
+        key = (y0, y1, res, rbox, HOLD.get("model", "current"))
         t0 = time.time()
         # Earthwork compares the window's first and last year: only those two are read
         years = [y0, y1]
@@ -3479,7 +3731,7 @@ def _(
             aef_by_year = {y: HOLD["aef"][(y, bkey)][0] for y in years if (y, bkey) in HOLD["aef"]}
             t1 = time.time()
             async with HOLD["build_lock"]:
-                fr = await cpu(build_frame, aef_by_year, y0, y1, res)
+                fr = await cpu(build_frame, aef_by_year, y0, y1, res, HOLD.get("model", "current"))
             if fr is None:
                 HOLD["hex_status"] = f"hexagons: res {res}, AlphaEarth is missing {y0} or {y1} here | " + " | ".join(HOLD["aef"][(y, bkey)][1] for y in years if (y, bkey) in HOLD["aef"])
                 return
@@ -3487,11 +3739,6 @@ def _(
                             "aef": [HOLD["aef"][(y, bkey)][1] for y in years if (y, bkey) in HOLD["aef"]], "t_frame": time.time()}
             HOLD["fseq"] = HOLD.get("fseq", 0) + 1
             fr["seq"] = HOLD["fseq"]
-            # the last few frames stay servable: the browser keeps the one on screen while the next loads
-            # behind it, and its tiles (a pan's new edge) must not fail as stale in that time
-            HOLD["frames"][fr["seq"]] = fr
-            for _old in sorted(HOLD["frames"])[:-3]:
-                del HOLD["frames"][_old]
             # each year's AlphaEarth read and fold, "c" where it came from memory
             _rd = []
             for y in years:
@@ -3685,6 +3932,17 @@ def _(
     HOLD["h_pick"] = _on_pick
 
     # ---- the controls -----------------------------------------------------------------
+    async def _push_stretch():
+        # the browser draws the false colors from the bands and stretches them itself: it needs
+        # the view's stretch, the only part of them the kernel still takes
+        try:
+            v = await s2_stretch()
+        except Exception as e:
+            _say(f"imagery stretch: {type(e).__name__}: {e}")
+            return
+        if v is not None:
+            _cfg(s2_stretch=v)
+
     def _on_ctl_body(change):
         try:
             c = json.loads(change["new"] or "{}")
@@ -3710,6 +3968,14 @@ def _(
             if s2_set_composite(str(c.get("comp", "tci")), box):
                 HOLD["s2gen"] += 1
                 _cfg(s2_gen=HOLD["s2gen"], s2_comp=str(c.get("comp", "tci")))
+                _spawn(_push_stretch())
+            return
+        if act == "model":
+            m = str(c.get("model", "current"))
+            if m in EW_MODELS and m != HOLD.get("model"):
+                HOLD["model"] = m
+                _cfg(model=m)
+                _request(force=True)
             return
         if act == "aef":
             a, b = int(c.get("y0", HOLD["y0"])), int(c.get("y1", HOLD["y1"]))
