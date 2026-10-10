@@ -1556,18 +1556,10 @@ def _(anywidget, asyncio, time, traitlets):
         .at.pair .at-map{left:50%}
         .at.pair .at-map2{display:block}
         .at.pair .at-msg{left:75%}
-        .at-side{position:absolute;left:50%;transform:translateX(-50%);bottom:56px;z-index:6;display:none;align-items:center;gap:12px;padding:6px 10px;font-size:12.5px;color:var(--muted);white-space:nowrap;max-width:calc(100% - 24px);overflow:hidden}
-        .at.pair .at-side{left:25%;bottom:40px;max-width:calc(50% - 24px);flex-wrap:wrap;justify-content:center;row-gap:4px;white-space:normal}
-        .at-side > *{white-space:nowrap}
-        .at-side.on{display:flex}
-        .at-side b{color:var(--text);font-weight:600}
-        .at-side i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
-        .at-side i.ln{height:3px;vertical-align:2px}
-        .at-side button{font:inherit;font-size:11.5px;padding:2px 7px;border-radius:6px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer}
-        .at-side kbd,.at-yc kbd{font:10.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--line);border-radius:4px;padding:1px 4px}
+        .at-yc kbd{font:10.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--line);border-radius:4px;padding:1px 4px}
         .at-glass{background:var(--glass);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 22px rgba(0,0,0,.35)}
         /* the cards a little see-through; the stronger blur keeps the text clear */
-        .at-panel.at-glass,.at-yc.at-glass,.at-side.at-glass{background:var(--card);backdrop-filter:blur(18px) saturate(1.15);-webkit-backdrop-filter:blur(18px) saturate(1.15)}
+        .at-panel.at-glass,.at-yc.at-glass{background:var(--card);backdrop-filter:blur(18px) saturate(1.15);-webkit-backdrop-filter:blur(18px) saturate(1.15)}
         .at button{font:inherit;color:inherit}
         .at button:focus-visible,.at input:focus-visible{outline:2px solid var(--cool);outline-offset:2px}
         .at-top{position:absolute;left:12px;top:12px;z-index:6;display:flex;flex-direction:column;gap:8px;align-items:flex-start;max-width:calc(100% - 420px)}
@@ -1703,6 +1695,15 @@ def _(anywidget, asyncio, time, traitlets):
         .at-yc .x{position:absolute;right:-6px;top:6px;border:0;background:none;color:var(--muted);cursor:pointer;width:28px;height:28px;border-radius:8px;font-size:17px;line-height:1}
         .at-yc .x:hover{background:var(--sel);color:var(--text)}
         /* the hexagon's card: small, floating by the click, compact until More */
+        /* the pair: the imagery card on the left half under the search, the Earthwork panel and the hexagon
+           card on the right half under the buttons, each over the map it speaks for */
+        .at-rcol{position:absolute;right:12px;top:60px;z-index:6;display:none;flex-direction:column;gap:8px;align-items:flex-end;max-width:calc(50% - 24px)}
+        .at.pair .at-rcol{display:flex}
+        .at-rcol .at-yc,.at-top .at-yc{position:relative;right:auto;top:auto}
+        .at-yc.at-s2c{display:none;transform-origin:top left}
+        .at.pair .at-yc.at-s2c{display:block}
+        .at-yc.gone{display:none}
+        .at-yc>.hexwrap:first-child .hex{border-top:0;margin-top:0;padding-top:0}
         .at-yc.at-fc{display:none;right:auto;top:auto;width:300px;z-index:8;padding:10px 14px 9px;transform-origin:top left}
         .at-yc.at-fc.more{width:360px;max-height:calc(100% - 24px);overflow:auto}
         .at-fc .hex{border-top:0;margin-top:0;padding-top:0}
@@ -2012,8 +2013,12 @@ def _(anywidget, asyncio, time, traitlets):
             keyEl.innerHTML = `Built ground (built-up, road or construction in ${y1}): barely <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> a lot, ${y0} to ${y1}`;
           }
           function styleRows() { styleFill(); styleWin(); styleKey(); }
-          top.append(search, panel);
+          // the pair's imagery card (renderYear) waits in the top left column, shown only in the pair
+          const s2c = el_("div", "at-yc at-s2c holding at-glass");
+          top.append(search, panel, s2c);
           pane.appendChild(top);
+          // the pair's right column: the Earthwork panel and the hexagon card move in (setPair)
+          const rcol = el_("div", "at-rcol");
 
           // top right: settings and fill the window, then the year card
           const tools = el_("div", "at-tools");
@@ -2028,11 +2033,9 @@ def _(anywidget, asyncio, time, traitlets):
           const fc = el_("div", "at-yc at-fc at-glass");
           pane.appendChild(yc);
           pane.appendChild(fc);
+          pane.appendChild(rcol);
           const tip = el_("div", "at-tip");
           pane.appendChild(tip);
-          // what the left side of the pair shows, with its key
-          const side = el_("div", "at-side at-glass");
-          pane.appendChild(side);
           const more = el_("div", "at-more at-glass");
           const item = (title, sub, ctl) => { const r = el_("div", "item"); r.append(el_("div", "", `${title}${sub ? `<small>${sub}</small>` : ""}`), ctl); more.appendChild(r); return r; };
           const sw = (get, set) => { const b = el_("button", "at-sw"); b.setAttribute("role", "switch"); const sty = () => { b.classList.toggle("on", !!get()); b.setAttribute("aria-checked", String(!!get())); }; b.onclick = () => { set(!get()); sty(); }; sty(); b.sty = sty; return b; };
@@ -2284,16 +2287,26 @@ def _(anywidget, asyncio, time, traitlets):
             if (c.km2) h += `<p class="sub">${c.km2 < 0.1 ? `${Math.round(c.km2 * 1e6).toLocaleString("en-US")} m²` : `${c.km2.toFixed(2)} km²`} hexagon.</p>`;
             return h + `</div>`;
           }
-          let ycFolded = keep("card"), ycOpenedFor = null;
+          let ycFolded = keep("card"), s2Folded = keep("s2card"), ycOpenedFor = null;
+          // the imagery's year, its colors and keys: the card's head while held, the pair's left card
+          const cbOf = (folded) => `<button class="at-cb" title="${folded ? "show the card" : "fold the card"}">${ICON.chev}</button>`;
+          const imgYr = (cbH, help) => `<div class="yr img"><b>${st.imgYear}</b><span class="comp">${COMP_NAME[st.s2comp] || ""}</span>${cbH}<span class="comps">${COMPS.map(([k, l, t]) => `<button data-comp="${k}" class="${k === st.s2comp ? "on" : ""}" title="${esc(t)}">${l}</button>`).join("")}</span><span class="help">${help}</span></div>`;
           function renderYear() {
             yc.classList.toggle("holding", st.holding);
             const c = viewCounts();
             // the imagery year only while the imagery shows; otherwise the hint
-            const cbH = `<button class="at-cb" title="${ycFolded ? "show the card" : "fold the card"}">${ICON.chev}</button>`;
+            const cbH = cbOf(ycFolded);
+            const yrKeys = `<kbd>[</kbd> <kbd>]</kbd> for another year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> for colors, <kbd>F</kbd> for full screen.`;
+            const s2on = st.pair && st.left === "s2";
+            if (s2on) {
+              s2c.innerHTML = imgYr(cbOf(s2Folded), `${yrKeys} <kbd>P</kbd> back to one map.`);
+              s2c.classList.toggle("collapsed", s2Folded);
+              s2c.querySelector(".at-cb").onclick = (e) => { e.stopPropagation(); s2Folded = !s2Folded; keep("s2card", s2Folded); renderYear(); };
+            }
             let h = st.holding
-              ? `<div class="yr img"><b>${st.imgYear}</b><span class="comp">${COMP_NAME[st.s2comp] || ""}</span>${cbH}<span class="comps">${COMPS.map(([k, l, t]) => `<button data-comp="${k}" class="${k === st.s2comp ? "on" : ""}" title="${esc(t)}">${l}</button>`).join("")}</span><span class="help">Scroll or <kbd>[</kbd> <kbd>]</kbd> for another year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> for colors, <kbd>F</kbd> for full screen. Let go to see the hexagons.</span></div>`
+              ? imgYr(cbH, `Scroll or ${yrKeys} Let go to see the hexagons.`)
               : st.pair
-              ? `<div class="yr quiet"><span><kbd>P</kbd> back to one map</span>${cbH}</div>`
+              ? ""
               : `<div class="yr quiet"><span>Hold space for the Sentinel-2 imagery; <kbd>P</kbd> pairs it with the map</span>${cbH}</div>`;
             // the view's chart by year belongs to the layers that date things (one voice per layer)
             if (N && hattrs && st.gmode === "much") {
@@ -2315,6 +2328,7 @@ def _(anywidget, asyncio, time, traitlets):
             yc.classList.toggle("collapsed", ycFolded);
             // only the hint in it (no hexagon picked, no imagery held): as small open as folded
             yc.classList.toggle("bare", !pc && !st.holding);
+            yc.classList.toggle("gone", !h);
             const cb = yc.querySelector(".yr .at-cb");
             if (cb) cb.onclick = (e) => { e.stopPropagation(); ycFolded = !ycFolded; keep("card", ycFolded); renderYear(); };
             const hx = yc.querySelector(".hexwrap .x");
@@ -2329,7 +2343,7 @@ def _(anywidget, asyncio, time, traitlets):
           function fitCard() {
             yc.style.transform = "";
             if (window.matchMedia("(max-width:760px)").matches) return;
-            const avail = pane.clientHeight - yc.offsetTop - 12, need = yc.offsetHeight;
+            const avail = pane.getBoundingClientRect().bottom - yc.getBoundingClientRect().top - 12, need = yc.offsetHeight;
             if (avail > 0 && need > avail) yc.style.transform = `scale(${avail / need})`;
           }
           // the hexagon's card lives in the top right card (renderYear); fc stays hidden
@@ -2344,8 +2358,8 @@ def _(anywidget, asyncio, time, traitlets):
             tip.style.top = (e.clientY - p.top + 12) + "px";
           });
           for (const el of [yc, fc]) el.addEventListener("pointerleave", () => { tip.style.display = "none"; });
-          // the imagery colors, from the hold card's own buttons
-          yc.addEventListener("click", (e) => {
+          // the imagery colors, from the hold card's own buttons and the pair's in the panel
+          for (const el of [yc, s2c]) el.addEventListener("click", (e) => {
             const b = e.target && e.target.closest && e.target.closest("[data-comp]");
             if (!b) return;
             e.stopPropagation();
@@ -2793,26 +2807,12 @@ def _(anywidget, asyncio, time, traitlets):
           function update() {
             if (ov) ov.setProps({layers: layers()});
             if (ov2) ov2.setProps({layers: layers2()});
-            renderSide();
           }
           function labels(on) {
             for (const m of [map, map2]) {
               if (!m || !m.isStyleLoaded()) continue;
               (m.getStyle().layers || []).forEach((l) => { if (l.layout && l.layout["text-field"] !== undefined) m.setLayoutProperty(l.id, "visibility", on ? "visible" : "none"); });
             }
-          }
-
-          function renderSide() {
-            side.classList.toggle("on", st.pair);
-            if (!st.pair) return;
-            side.innerHTML = `<b>Sentinel-2 ${st.imgYear}</b><span>${esc(COMP_NAME[st.s2comp] || "")}</span><span><kbd>[</kbd> <kbd>]</kbd> year, <kbd>B</kbd> ${S2Y[0]} or ${S2Y[S2Y.length - 1]}, <kbd>C</kbd> colors</span>`;
-          }
-          side.addEventListener("click", (e) => { const b = e.target.closest && e.target.closest("button[data-left]"); if (b) setLeft(b.getAttribute("data-left")); });
-          function setLeft(v) {
-            if (st.left === v) return;
-            st.left = v;
-            if (v === "s2" && st.s2comp !== "tci") send("s2comp", {comp: st.s2comp});
-            update();
           }
 
           // ---- the pair (P) ---------------------------------------------------------------
@@ -2847,6 +2847,9 @@ def _(anywidget, asyncio, time, traitlets):
             if (on && st.holding) endHold(null);
             st.pair = on;
             root.classList.toggle("pair", on);
+            // paired, the Earthwork panel and the hexagon card go over the hexagons on the right
+            if (on) rcol.append(panel, yc);
+            else { top.insertBefore(panel, s2c); pane.insertBefore(yc, fc); }
             bPair.classList.toggle("on", on);
             bPair.title = on ? "back to one map (P)" : "pair the map with Sentinel-2 (P)";
             // the same zoom on both sides (each shows half the ground of one map), so the model and the
