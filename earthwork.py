@@ -1405,14 +1405,14 @@ def _(change_resolution, np, os, pa):
         import urllib.request as _ur
         with _ur.urlopen("https://raw.githubusercontent.com/kentstephen/aef-earthwork/main/models/earthwork-lr.npz", timeout=60) as _r:
             _ew = np.load(_io.BytesIO(_r.read()))
-    # every model to compare (M on the map): "current" is earthwork-lr.npz, the others its variants in models/
-    # (earthwork-lr-<name>.npz) that read the same 256 features
+    # the two models the card offers (M switches them): "current" (earthwork-lr.npz), taught on US lidar only, and
+    # "abroad" (earthwork-lr-abroad.npz), taught with truth from outside the 48 states too. The other files in
+    # models/ are experiments kept for the record, not offered on the map
     EW_MODELS = {"current": (_ew["w"].astype(np.float32), float(_ew["b"]))}
-    for _f in sorted(os.listdir(_ewd)) if os.path.isdir(_ewd) else []:
-        if _f.startswith("earthwork-lr-") and _f.endswith(".npz"):
-            _m = np.load(os.path.join(_ewd, _f))
-            if _m["w"].shape == (256,):
-                EW_MODELS[_f[len("earthwork-lr-"):-len(".npz")]] = (_m["w"].astype(np.float32), float(_m["b"]))
+    _abp = os.path.join(_ewd, "earthwork-lr-abroad.npz")
+    if os.path.exists(_abp):
+        _m = np.load(_abp)
+        EW_MODELS["abroad"] = (_m["w"].astype(np.float32), float(_m["b"]))
     # ONLY WHERE ALPHAEARTH CHANGED: the score is multiplied by clip((change - LO) / (HI - LO), 0, 1), change
     # = 1 - cos(b, a). The model reads each year's look too, and bare ground in both years (a graded pad at the
     # US sites it learned from) reads as dug: open desert, which barely changes (about 0.04), lit up wholesale.
@@ -1598,6 +1598,8 @@ def _(anywidget, asyncio, time, traitlets):
         .at-panel{display:flex;flex-direction:column;gap:8px;padding:9px 11px;width:360px;max-width:calc(100vw - 32px);box-sizing:border-box}
         .at-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
         .at-lab{font-size:12.5px;color:var(--muted);min-width:64px}
+        .at-mkey{font:11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:2px 5px}
+        .at-mwhy{flex-basis:100%;font-size:12px;color:var(--muted);margin:-2px 0 2px}
         .seg-s,.seg-f{display:flex;gap:2px;padding:2px;border:1px solid var(--line);border-radius:9px;width:max-content}
         .seg-s button,.seg-f button{border:0;background:none;color:var(--muted);padding:3px 10px;border-radius:7px;cursor:pointer}
         .seg-s button:hover,.seg-f button:hover{color:var(--text)}
@@ -1791,9 +1793,6 @@ def _(anywidget, asyncio, time, traitlets):
         const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
         const fmt = (n) => Number(n).toLocaleString("en-US");
         const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
-        const cap = (s) => s ? s[0].toUpperCase() + s.slice(1) : s;
-        // the model's "desert" class is Impact Observatory's bare ground: shown as that, everywhere
-        const showClass = (nm) => nm === "desert" ? "bare ground" : nm;
         const INK = [230, 233, 236];
 
         function bytesOf(v) {
@@ -1817,16 +1816,6 @@ def _(anywidget, asyncio, time, traitlets):
         const howMuch = (t) => t >= 0.75 ? "a lot" : t >= 0.4 ? "a fair amount" : t >= 0.15 ? "a little" : "barely";
         const FAIR = 1 + Math.round(254 * 0.4);  // the level byte at "a fair amount"
         const HB = 17;  // bytes per hexagon in hattrs (the 9th: 1 on built ground; 10 to 16 the model's; 17 earthwork, see _paint)
-        // All built, built classes only (the rest left empty), in the map's colors: other
-        // built-up light orange, road slate, building deep orange; nothing on red
-        const AB_RGB = {5: [240, 178, 122], 6: [140, 146, 158], 7: [200, 98, 15]};
-        // the year the model first reads built: cividis, dark blue to yellow, a
-        // lightness ramp on the blue to yellow axis with no red in it; the newest years
-        // brightest, so recent building stands out on the dark basemap
-        const YR_STOPS = ["2c4a7c", "3f5a7a", "5d6b76", "7f8279", "a19a73", "c6b564", "f0d84c"].map((h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)));
-        // the whole cividis over the window's own years (y0 dark blue, y1 yellow), one step a year
-        const yrCol = (y, y0, y1) => { const n = Math.max(1, y1 - y0); let t = Math.max(0, Math.min(1, (Math.round(y) - y0) / n)) * (YR_STOPS.length - 1); const i = Math.min(YR_STOPS.length - 2, Math.floor(t)), f = t - i; return YR_STOPS[i].map((v, j) => Math.round(v + (YR_STOPS[i + 1][j] - v) * f)); };
-        const MODEL_MODES = ["allbuilt", "struct", "first"];
         // kinds of change, largest first: Okabe-Ito, made to stay apart for
         // red-weak and other color vision; quiet ground (0) faint gray
         const KIND_RGB = [[230, 159, 0], [86, 180, 233], [0, 158, 115], [240, 228, 66], [0, 114, 178], [204, 121, 167]];
@@ -1933,12 +1922,30 @@ def _(anywidget, asyncio, time, traitlets):
           // KINDS OF CHANGE COMMENTED OUT: AEF Change on built ground only
           const styleSeg = segOf(rFill, [["earth", "Earthwork", "the chance the ground itself moved (dug, filled, graded) between the first and last year read: a model taught by 3DEP repeat lidar", "E"],
                                           /* ["kinds", "Kinds of change", "the ground that moved most, grouped by the way it moved: the same color changed the same way. Click a kind in the key to hide or show it", "A"], */
-                                          ...(cfg.models ? [["allbuilt", "All built", "other built-up, road and building, from the shared models run on every 10 m pixel and refined in the view", ""],
-                                          ["struct", "Structure reading", "the chance a structure stands on or touches the ground, from the height implicit in AlphaEarth", "R"],
-                                          ["first", "First year built", "the first year read in which the model calls the hexagon built", "Y"]] : [])],
+                                          ],
                                   (k) => k === st.gmode, (k) => { if (k === "kinds" && !hmeta.kinds_ready) return; st.want = k; st.gmode = drawnMode(); recolorHex(); styleRows(); renderYear(); update(); });
-          // one layer (Earthwork) unless the models are on: no choice to show
-          if (!cfg.models) rFill.style.display = "none";
+          // one layer (Earthwork): no choice to show
+          rFill.style.display = "none";
+          // the two models (EW_MODELS in the kernel), side by side under the title, the one drawn lit and in
+          // words under them; M switches them
+          const MODELS = cfg.ew_models || ["current"];
+          const MODEL_INFO = {
+            current: ["Current", "Taught on US lidar only. Stronger in the US."],
+            abroad: ["Ex-US", "Taught with truth from outside the US too. Stronger outside it."],
+          };
+          st.model = cfg.model || "current";
+          const rModel = rowOf("Model");
+          const styleModelSeg = segOf(rModel, MODELS.map((k) => [k, (MODEL_INFO[k] || [k])[0], (MODEL_INFO[k] || [k, ""])[1], ""]), (k) => k === st.model, (k) => setModel(k));
+          rModel.querySelector(".seg-s").classList.remove("col");
+          const modelKey = el_("kbd", "at-mkey", "M");
+          modelKey.title = "M swaps the model";
+          rModel.appendChild(modelKey);
+          const modelWhy = el_("span", "at-mwhy");
+          rModel.appendChild(modelWhy);
+          const styleModel = () => { styleModelSeg(); modelWhy.textContent = (MODEL_INFO[st.model] || ["", ""])[1]; };
+          styleModel();
+          function setModel(k) { if (k === st.model) return; st.model = k; send("model", {model: k}); styleModel(); note(`Model: ${(MODEL_INFO[k] || [k])[0]}`, 2500); }
+          if (MODELS.length < 2) rModel.style.display = "none";
           // while Kinds of change waits: its button grayed, and a line under it with the zoom it
           // appears at and the zoom now
           const rSoon = rowOf("");
@@ -1947,13 +1954,11 @@ def _(anywidget, asyncio, time, traitlets):
           rSoon.append(soonTxt, soonZ);
           const styleSoon = () => {
             const z = map ? map.getZoom() : 0, KZ = cfg.kinds_zoom || 11.8;
-            const OZ = hmeta.otf_zoom || 13, model = MODEL_MODES.includes(st.gmode);
-            const show = st.gmode !== "earth" && z >= HEXZ && (model ? (z < OZ || hmeta.otf_pending) : !hmeta.kinds_ready);
+            const show = st.gmode !== "earth" && z >= HEXZ && !hmeta.kinds_ready;
             rSoon.style.display = show ? "" : "none";
             if (!show) return;
-            // what reads the ground now: zoomed out the view's land cover reader, from the 10 m read the shared models
-            if (model) soonTxt.textContent = hmeta.otf_pending ? "The model: running on this view" : `The model runs on every 10 m pixel from zoom ${OZ}`;
-            else soonTxt.textContent = z < KZ ? `Built ground read from ESA WorldCover 2021 until zoom ${KZ}` : "Built ground: reading the land cover";
+            // what reads the ground now: the view's land cover reader
+            soonTxt.textContent = z < KZ ? `Built ground read from ESA WorldCover 2021 until zoom ${KZ}` : "Built ground: reading the land cover";
             soonZ.textContent = `zoom ${z.toFixed(1)}`;
           };
           // the moment Kinds of change is ready, a soft ring on its button, twice; and a small dot on it while
@@ -2007,7 +2012,7 @@ def _(anywidget, asyncio, time, traitlets):
             const y0 = hmeta.y0 || st.y0, y1 = hmeta.y1 || st.y1;
             const out_ = map && map.getZoom() < HEXZ;
             // the title is what is drawn, open or folded
-            panelHd.querySelector(".t").textContent = {earth: "Earthwork", kinds: "Kinds of change", much: "AEF Change", allbuilt: "All built", struct: "Structure reading", first: "First year built"}[st.gmode] || "AEF Change";
+            panelHd.querySelector(".t").textContent = {earth: "Earthwork", kinds: "Kinds of change", much: "AEF Change"}[st.gmode] || "AEF Change";
             styleSoon();
             if (out_) {
               keyEl.innerHTML = `<span class="why">Zoom in to ${HEXZ} for the hexagons.</span>`;
@@ -2027,12 +2032,6 @@ def _(anywidget, asyncio, time, traitlets):
               keyEl.querySelectorAll("[data-kind]").forEach((b) => { b.onclick = (e) => { e.stopPropagation(); const k = +b.dataset.kind; st.hideKinds.has(k) ? st.hideKinds.delete(k) : st.hideKinds.add(k); recolorHex(); renderYear(); styleKey(); update(); }; });
               return;
             }
-            const sw_ = (c, t) => `<span><i class="at-kind-dot" style="background:rgb(${c.join(",")})"></i>${t}</span>`;
-            const wsfK = "";
-            const src = hmeta.otf ? `<span class="why">The shared models on every 10 m pixel, refined in the view by its live teachers (${esc(Object.keys(hmeta.otf.teachers || {}).join(", "))}); land cover from ${esc(hmeta.otf.lc_source || "")}. Click a hexagon for its account.</span>` : `<span class="why">Zoom in to ${hmeta.otf_zoom || 13} to run the model here.</span>`;
-            if (st.gmode === "allbuilt") { keyEl.innerHTML = sw_(AB_RGB[5], "other built-up") + sw_(AB_RGB[6], "road") + sw_(AB_RGB[7], "building") + `<span class="why">In ${y1}, every hexagon whose ground most reads as other built-up, road or building.</span>` + src + wsfK; return; }
-            if (st.gmode === "struct") { keyEl.innerHTML = `50% <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> 100%<span class="why">Only where a structure stands: the mean chance a structure stands on or touches each 10 m of it, ${y1}.</span>` + src + wsfK; return; }
-            if (st.gmode === "first") { keyEl.innerHTML = Array.from({length: y1 - y0 + 1}, (_, k) => y0 + k).map((y) => sw_(yrCol(y, y0, y1), y === y0 ? `${y} or before` : `${y}`)).join("") + `<span class="why">Only where a structure stands: the first year read in which half of it or more reads built (other built-up, road or building).</span>` + src + wsfK; return; }
             if (st.gmode === "earth" && st.area && areaSt) {
               const top = Math.round(100 * areaSt.topGlobal);
               const k0 = st.areaFloor || 0, fl = AREA_FLOORS[k0], nF = AREA_FLOORS.length - 1;
@@ -2059,7 +2058,7 @@ def _(anywidget, asyncio, time, traitlets):
               return;
             }
             if (st.gmode === "earth") { keyEl.innerHTML = `Ground moved, ${y0} to ${y1}: unlikely <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> likely<span class="why">The chance the ground itself was dug, filled or graded, from AlphaEarth's ${y0} and ${y1} by a model taught on 3DEP repeat lidar. Each hexagon shows its highest-scoring patch.</span>`; return; }
-            keyEl.innerHTML = `Built ground (built-up, road or construction in ${y1}): barely <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> a lot, ${y0} to ${y1}` + wsfK;
+            keyEl.innerHTML = `Built ground (built-up, road or construction in ${y1}): barely <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> a lot, ${y0} to ${y1}`;
           }
           function styleRows() { styleFill(); styleWin(); styleKey(); }
           top.append(search, panel);
@@ -2109,13 +2108,6 @@ def _(anywidget, asyncio, time, traitlets):
           // new colors are new tiles: the year shown loads alone first again (s2Warm)
           function setComp(k) { st.s2comp = k; s2Warm = false; send("s2comp", {comp: k}); styleComp(); renderYear(); }
           item("Imagery colors", "C steps them", compBox);
-          // the Earthwork models to compare (EW_MODELS in the kernel): current is the one the map ships with
-          const MODELS = cfg.models || ["current"];
-          st.model = cfg.model || "current";
-          const modelBox = el_("div");
-          const styleModel = segOf(modelBox, MODELS.map((k) => [k, k, k === "current" ? "models/earthwork-lr.npz" : `models/earthwork-lr-${k}.npz`, ""]), (k) => k === st.model, (k) => setModel(k));
-          function setModel(k) { st.model = k; send("model", {model: k}); styleModel(); say(`Earthwork model: ${k}`); }
-          if (MODELS.length > 1) item("Earthwork model", "M steps them", modelBox);
           const swLab = sw(() => st.labels, (v) => { st.labels = v; labels(v); });
           item("Place names", "", swLab);
           more.appendChild(el_("hr"));
@@ -2238,19 +2230,6 @@ def _(anywidget, asyncio, time, traitlets):
                   // that changed made more see-through
                   if (st.focus === "built" && hattrs[a8 + 7] !== 3) a = A_DIM;
                 }
-              } else if (MODEL_MODES.includes(st.gmode)) {
-                // the model's answer where the store covers the hexagon; All built falls back to
-                // the view's land cover reader (faint) where it does not
-                const cov = hattrs[a8 + 15];
-                // Structure reading and First year built are clipped to structures: only hexagons
-                // most of whose 10 m ground reads standing (the structure reading at 50% or more).
-                // All built is not: roads and flat built ground never read standing
-                if (!cov || (st.gmode !== "allbuilt" && hattrs[a8 + 13] !== 1)) continue;
-                if (st.gmode === "allbuilt") {
-                  const c = hattrs[a8 + 9]; if (!AB_RGB[c]) continue; col = AB_RGB[c]; a = Math.round(120 + (A_FILL - 120) * hattrs[a8 + 10] / 255);
-                } else if (!cov) continue;
-                else if (st.gmode === "struct") { const v = hattrs[a8 + 12]; if (v > 100) continue; col = vir(Math.max(0, (v - 50) / 50)); a = A_FILL; }
-                else { const fy = hattrs[a8 + 14]; if (!fy) continue; col = yrCol(2000 + fy, hmeta.y0 || st.y0, hmeta.y1 || st.y1); a = A_FILL; }
               } else {
                 // built ground only (BUILT_SHARE in the kernel)
                 if (!lv || !hattrs[a8 + 8]) continue;
@@ -2272,16 +2251,6 @@ def _(anywidget, asyncio, time, traitlets):
               return v ? `<b>Earthwork ${Math.round(100 * (v - 1) / 254)}%</b>${areaWords(i)}: the chance the ground itself was dug, filled or graded, ${hmeta.y0 || st.y0} to ${hmeta.y1 || st.y1}` : "No AlphaEarth data here.";
             }
             let s;
-            if (MODEL_MODES.includes(st.gmode)) {
-              const cov = hattrs[o + 15], y1 = hmeta.y1 || st.y1;
-              if (!cov) return `The model has not run here yet: it runs from zoom ${hmeta.otf_zoom || 13}.`;
-              const cls = hattrs[o + 9], sv = hattrs[o + 12], g = hattrs[o + 13], fy = hattrs[o + 14];
-              const nm = (hmeta.otf_classes || [])[cls - 1] || "unread";
-              // one voice per layer, as the card
-              if (st.gmode === "struct") return sv <= 100 ? `<b>Structure ${sv}%</b> in ${y1}` : "No AlphaEarth here.";
-              if (st.gmode === "first") return fy ? `<b>Built from ${2000 + fy}${2000 + fy === (hmeta.y0 || st.y0) ? " or before" : ""}</b>` : "<b>Not read built</b> in the years read";
-              return `<b>${cap(showClass(nm))}</b> in ${y1}, ${Math.round(100 * hattrs[o + 10] / 255)}% built`;
-            }
             if (st.gmode === "kinds") {
               const kd = hattrs[o + 6];
               s = kd ? `<b>Kind ${kd}</b>, changed ${howMuch((lv - 1) / 254)}${yb ? `, most in ${2000 + yb}` : ""}` : `<b>Not grouped</b>: changed ${howMuch((lv - 1) / 254)}, less than the ground that moved most`;
@@ -2306,8 +2275,7 @@ def _(anywidget, asyncio, time, traitlets):
             if (hattrs) for (let i = 0; i < N; i++) {
               const o = HB * i, lv = hattrs[o + 1];
               if (lv && hattrs[o + 8]) total++;
-              if (MODEL_MODES.includes(st.gmode)) { const fy = hattrs[o + 14]; if (fy && hattrs[o + 15] && out[2000 + fy] != null) out[2000 + fy]++; }
-              else if (st.gmode === "kinds") { const yb = hattrs[o], kd = hattrs[o + 6]; if (yb && kd && !st.hideKinds.has(kd) && out[2000 + yb] != null) out[2000 + yb]++; }
+              if (st.gmode === "kinds") { const yb = hattrs[o], kd = hattrs[o + 6]; if (yb && kd && !st.hideKinds.has(kd) && out[2000 + yb] != null) out[2000 + yb]++; }
               else { const yb = hattrs[o]; if (yb && lv >= FAIR && hattrs[o + 8] && out[2000 + yb] != null) out[2000 + yb]++; }
             }
             return {years: out, dated, total};
@@ -2371,39 +2339,8 @@ def _(anywidget, asyncio, time, traitlets):
               h += `</div>`;
             }
             // ONE VOICE PER LAYER: the card speaks for the layer the map is colored by, nothing else
-            const mode = st.gmode, o = c.otf && c.otf.years && c.otf.years.length ? c.otf : null;
-            const last = o ? o.years[o.years.length - 1] : null;
-            const y0c = hmeta.y0 || st.y0;
-            const noModel = `<p>The model has not run here yet: it runs from zoom ${hmeta.otf_zoom || 13}.</p>`;
-            const builtOf = (r) => r.shares[4] + r.shares[5] + r.shares[6];
-            if (mode === "allbuilt") {
-              if (!o) h += noModel;
-              else {
-                const names = c.otf_classes || [];
-                h += `<h4>All built, ${last.year}</h4><div class="at-lc">`;
-                last.shares.map((v, k) => [names[k], v]).filter(([, v]) => v >= 0.01).sort((a, b) => b[1] - a[1]).slice(0, 5)
-                  .forEach(([nm, v]) => { h += `<span>${esc(cap(showClass(nm)))}</span><span><i style="width:${Math.max(2, 120 * v)}px"></i></span><span>${Math.round(100 * v)}%</span>`; });
-                h += `</div>`;
-                if (o.years.length > 1) h += `<p class="sub">Built (other built-up, road or building) by year: ${o.years.map((r) => `${r.year} ${Math.round(100 * builtOf(r))}%`).join(", ")}.</p>`;
-              }
-            } else if (mode === "struct") {
-              if (!o) h += noModel;
-              else {
-                h += `<h4>Structure reading, ${last.year}</h4>`;
-                h += last.structure != null ? `<p>On average a <b>${last.structure}%</b> chance that a structure stands on or touches each 10 m of it.</p>` : `<p>No AlphaEarth here.</p>`;
-                const ys = o.years.filter((r) => r.structure != null);
-                if (ys.length > 1) h += `<p class="sub">By year: ${ys.map((r) => `${r.year} ${Math.round(r.structure)}%`).join(", ")}.</p>`;
-              }
-            } else if (mode === "first") {
-              if (!o) h += noModel;
-              else {
-                const fr = o.years.find((r) => builtOf(r) >= 0.5);
-                h += `<h4>First year built</h4>`;
-                h += fr ? `<p>Half of it or more first reads built in <b>${fr.year}${fr.year === y0c ? " or before" : ""}</b>.</p>` : `<p>Not read built in any year from ${o.years[0].year} to ${last.year}.</p>`;
-                if (o.years.length > 1) h += `<p class="sub">Built by year: ${o.years.map((r) => `${r.year} ${Math.round(100 * builtOf(r))}%`).join(", ")}.</p>`;
-                if (last.structure != null && last.structure < 50) h += `<p class="sub">Not drawn: the map shows only where a structure stands (the structure reading at 50% or more), and it reads ${Math.round(last.structure)}% here.</p>`;
-              }
-            } else if (c.level == null) h += `<p>No AlphaEarth data here.</p>`;
+            const mode = st.gmode;
+            if (c.level == null) h += `<p>No AlphaEarth data here.</p>`;
             else if (mode === "earth") {
               const i = c.cell ? hexIndex.get(c.cell) : null, v = i != null && hattrs ? hattrs[HB * i + 16] : 0;
               h += `<h4>Earthwork</h4>`;
@@ -2432,10 +2369,8 @@ def _(anywidget, asyncio, time, traitlets):
               ? `<div class="yr quiet"><span><kbd>P</kbd> back to one map</span>${cbH}</div>`
               : `<div class="yr quiet"><span>Hold space for the Sentinel-2 imagery; <kbd>P</kbd> pairs it with the map</span>${cbH}</div>`;
             // the view's chart by year belongs to the layers that date things (one voice per layer)
-            if (N && hattrs && (st.gmode === "first" || st.gmode === "much")) {
-              h += MODEL_MODES.includes(st.gmode)
-                ? `<h4>First year built, by year</h4><p class="sub">Hexagons the model has read, by the first year read in which half of each reads built (the first bar: that year or before)</p>`
-                : st.gmode === "kinds"
+            if (N && hattrs && st.gmode === "much") {
+              h += st.gmode === "kinds"
                 ? `<h4>Kinds of change, by year</h4><p class="sub">Hexagons in the kinds shown, by the year their change stood out most</p>`
                 : `<h4>Where it changed, by year</h4><p class="sub">Hexagons in view that changed a fair amount or more, by the year their change stood out most</p>`;
               h += yearBars(c);
@@ -2872,94 +2807,6 @@ def _(anywidget, asyncio, time, traitlets):
             opacity: (left ? st.pair && st.left === "s2" : st.holding) && year === st.imgYear ? 1 : 0,
             renderSubLayers: (p) => { if (!p.data) return null; const {west, south, east, north} = p.tile.bbox; return new BitmapLayer(p, {data: null, image: p.data, bounds: [west, south, east, north]}); },
           });
-          // the model's res 13 tiles: hexagon edges drawn from the H3 boundary, not the tile's pixels
-          //. The tile says which hexagons are near a pixel (its
-          // 3x3 texels, as local indices); each one's ring (h3-js
-          // cellToBoundary, in tile pixel units) gives the fragment's signed
-          // distance to that hexagon, and the hexagon covers the fragment by
-          // that distance over one screen pixel. Smooth at any zoom; an edge
-          // against no hexagon fades to clear.
-          const GEO_W = 64, COL_W = 256;  // hexagons per row of the ring and color textures
-          class HexEdgeLayer extends BitmapLayer {
-            getShaders() {
-              const s = super.getShaders();
-              s.fs = s.fs.replace("uniform sampler2D bitmapTexture;", "uniform sampler2D bitmapTexture;\nuniform highp sampler2D hexGeom;\nuniform sampler2D hexCol;");
-              s.fs = s.fs.replace("vec4 bitmapColor = texture(bitmapTexture, uv);", `
-                ivec2 tsz = textureSize(bitmapTexture, 0);
-                vec2 tp = uv * vec2(tsz);
-                ivec2 tc = clamp(ivec2(floor(tp)), ivec2(0), tsz - 1);
-                float pw = max(0.7071 * length(fwidth(tp)), 1e-5);
-                int seen[9]; int ns = 0;
-                vec4 acc = vec4(0.0);
-                float cs = 0.0;  // coverage summed: near a corner the edge distances overlap past one pixel
-                for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
-                  vec4 t = texelFetch(bitmapTexture, clamp(tc + ivec2(dx, dy), ivec2(0), tsz - 1), 0);
-                  int k = int(t.r * 255.0 + 0.5) + 256 * int(t.g * 255.0 + 0.5) - 1;
-                  if (k < 0) continue;
-                  bool dup = false;
-                  for (int j = 0; j < 9; j++) { if (j >= ns) break; if (seen[j] == k) dup = true; }
-                  if (dup) continue;
-                  seen[ns] = k; ns++;
-                  vec2 v[10];
-                  for (int j = 0; j < 5; j++) { vec4 g = texelFetch(hexGeom, ivec2(5 * (k % ${GEO_W}) + j, k / ${GEO_W}), 0); v[2 * j] = g.xy; v[2 * j + 1] = g.zw; }
-                  vec2 ctr = vec2(0.0);
-                  for (int j = 0; j < 10; j++) ctr += v[j];
-                  ctr /= 10.0;
-                  float sd = 1e9;
-                  for (int j = 0; j < 10; j++) {
-                    vec2 a = v[j], e = v[(j + 1) % 10] - a;
-                    float L = length(e);
-                    if (L < 1e-6) continue;
-                    vec2 nr = vec2(-e.y, e.x) / L;
-                    if (dot(ctr - a, nr) < 0.0) nr = -nr;
-                    sd = min(sd, dot(tp - a, nr));
-                  }
-                  vec4 c = texelFetch(hexCol, ivec2(k % ${COL_W}, k / ${COL_W}), 0);
-                  float cov = clamp(sd / pw + 0.5, 0.0, 1.0);
-                  acc += vec4(c.rgb * c.a, c.a) * cov; cs += cov;
-                }
-                // within a tile pixel of the tile's edge, what no hexagon covers (a sliver of a hexagon
-                // listed only in the next tile: none of this tile's pixel centers falls in it) takes the
-                // hexagon of the tile pixel under it, unfaded, so tile edges leave no dotted seam
-                vec2 bd = min(tp, vec2(tsz) - tp);
-                if (min(bd.x, bd.y) < 1.0 && cs < 1.0) {
-                  vec4 t0 = texelFetch(bitmapTexture, tc, 0);
-                  int k0 = int(t0.r * 255.0 + 0.5) + 256 * int(t0.g * 255.0 + 0.5) - 1;
-                  if (k0 >= 0) { vec4 c0 = texelFetch(hexCol, ivec2(k0 % ${COL_W}, k0 / ${COL_W}), 0); acc += vec4(c0.rgb * c0.a, c0.a) * (1.0 - cs); cs = 1.0; }
-                }
-                if (cs > 1.0) acc /= cs;
-                vec4 bitmapColor = acc.a > 1e-4 ? vec4(acc.rgb / acc.a, min(acc.a, 1.0)) : vec4(0.0);`);
-              return s;
-            }
-            updateState(params) {
-              super.updateState(params);
-              const {props, oldProps} = params, dev = this.context.device;
-              const mk = (format, width, height, data) => dev.createTexture({format, width, height, data, mipmaps: false, sampler: {minFilter: "nearest", magFilter: "nearest", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge"}});
-              const st_ = this.state;
-              if (props.pic !== oldProps.pic && props.pic) {
-                st_.idTex && st_.idTex.destroy(); st_.geoTex && st_.geoTex.destroy();
-                const q = props.pic;
-                st_.idTex = mk("rg8unorm", q.n, q.n, q.idx);
-                st_.geoTex = mk("rgba32float", 5 * GEO_W, q.gh, q.geo);
-              }
-              if (props.col !== oldProps.col && props.col) {
-                st_.colTex && st_.colTex.destroy();
-                st_.colTex = mk("rgba8unorm", COL_W, props.col.length / (4 * COL_W), props.col);
-              }
-            }
-            finalizeState(ctx) {
-              super.finalizeState(ctx);
-              for (const k of ["idTex", "geoTex", "colTex"]) if (this.state[k]) this.state[k].destroy();
-            }
-            draw(opts) {
-              const {model, coordinateConversion, bounds, idTex, geoTex, colTex} = this.state;
-              if (!model || !idTex || !geoTex || !colTex || opts.shaderModuleProps.picking.isActive) return;
-              model.setBindings({hexGeom: geoTex, hexCol: colTex});
-              model.shaderInputs.setProps({bitmap: {bitmapTexture: idTex, bounds, coordinateConversion, desaturate: 0, tintColor: [1, 1, 1], transparentColor: [0, 0, 0, 0]}});
-              model.draw(this.context.renderPass);
-            }
-          }
-          HexEdgeLayer.layerName = "HexEdgeLayer";
           // the hexagons: the frame's cells drawn as geometry, colored from hcol. A zoom or pan only
           // rescales what is on screen (nothing to fetch per tile), and a new frame replaces the old
           // one whole the moment its cells arrive. hexData is made once per frame, so a hover or a
@@ -2973,67 +2820,6 @@ def _(anywidget, asyncio, time, traitlets):
             updateTriggers: {getFillColor: [hexSeq]},
             filled: true, stroked: false, extruded: false, highPrecision: true, pickable: false,
             beforeId: slot(),
-          });
-          // ---- the model's res 13 (res 12 under zoom 14), from zoom OTF13_Z: tiles of the store's own cells (the
-          // kernel sends each tile's cells, 8 bytes each, and every pixel's local cell), drawn
-          // with the same edge layer. Hexagons this small cost nothing as an image.
-          const OTF13_Z = 13;
-          const unzRaw = async (u8) => new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
-          function modelCol(at, o) {
-            // the same rules as the frame's model modes, for one cell's 8 bytes at o
-            if (!at[o + 6] || (st.gmode !== "allbuilt" && at[o + 4] !== 1)) return null;
-            if (st.gmode === "allbuilt") { const c = at[o]; return AB_RGB[c] ? [...AB_RGB[c], Math.round(120 + (A_FILL - 120) * at[o + 1] / 255)] : null; }
-            if (st.gmode === "struct") { const v = at[o + 3]; return v > 100 ? null : [...vir(Math.max(0, (v - 50) / 50)), A_FILL]; }
-            if (st.gmode === "first") { const fy = at[o + 5]; return fy ? [...yrCol(2000 + fy, hmeta.y0 || st.y0, hmeta.y1 || st.y1), A_FILL] : null; }
-            return null;
-          }
-          function tilePic13(d) {
-            const key = st.gmode + ":" + hexSeq;
-            if (d.col && d.ckey === key) return d;
-            if (!d.pic) {
-              const n = d.side, K = d.K, idx = new Uint8Array(2 * n * n);
-              for (let i = 0; i < d.ids.length; i++) { const v = d.ids[i]; if (v) { idx[2 * i] = v & 255; idx[2 * i + 1] = v >> 8; } }
-              const gh = Math.max(1, Math.ceil(K / GEO_W)), geo = new Float32Array(5 * GEO_W * gh * 4);
-              const Z = 2 ** d.z, lonC = (d.x + 0.5) / Z * 360 - 180;
-              for (let j = 0; j < K; j++) {
-                const r = ring(d.cells[j]);
-                if (!r) continue;
-                const m = Math.min(10, r.length - 1), o = (Math.floor(j / GEO_W) * 5 * GEO_W + 5 * (j % GEO_W)) * 4;
-                for (let q = 0; q < 10; q++) {
-                  let [lng, lat] = r[Math.min(q, m - 1)];
-                  if (lng - lonC > 180) lng -= 360; else if (lng - lonC < -180) lng += 360;
-                  const sn = Math.sin(lat * Math.PI / 180);
-                  geo[o + 2 * q] = ((lng + 180) / 360 * Z - d.x) * n;
-                  geo[o + 2 * q + 1] = ((0.5 - Math.log((1 + sn) / (1 - sn)) / (4 * Math.PI)) * Z - d.y) * n;
-                }
-              }
-              d.pic = {n, idx, geo, gh};
-            }
-            const col = new Uint8Array(COL_W * Math.max(1, Math.ceil(d.K / COL_W)) * 4);
-            for (let j = 0; j < d.K; j++) { const c = modelCol(d.attrs, 8 * j); if (c) col.set(c, 4 * j); }
-            d.col = col; d.ckey = key;
-            return d;
-          }
-          const otf13Layer = (visible) => new TileLayer({
-            id: "otf13-" + (hmeta.otf_ver || 0), visible,
-            getTileData: async ({index, signal}) => {
-              const u8 = await ask("otf13", hmeta.otf_ver || 0, index, signal);
-              if (!u8) return null;
-              const b = await unzRaw(u8), K = new DataView(b.buffer).getUint32(0, true);
-              const cb = new BigUint64Array(b.buffer.slice(4, 4 + 8 * K)), cells = new Array(K);
-              for (let j = 0; j < K; j++) cells[j] = cb[j].toString(16);
-              const attrs = b.slice(4 + 8 * K, 4 + 16 * K), ids = new Uint32Array(b.buffer.slice(4 + 16 * K));
-              return {K, cells, attrs, ids, side: Math.round(Math.sqrt(ids.length)), z: index.z, x: index.x, y: index.y};
-            },
-            onTileError: (e) => { if (!e || e.name !== "AbortError") say("res 13 tile: " + ((e && e.message) || e)); },
-            tileSize: 256, minZoom: OTF13_Z, maxZoom: 17, refinementStrategy: "no-overlap", debounceTime: 60, beforeId: slot(),
-            updateTriggers: {renderSubLayers: [hexSeq, st.gmode]},
-            renderSubLayers: (p) => {
-              const t = p.data ? tilePic13(p.data) : null;
-              if (!t) return null;
-              const {west, south, east, north} = p.tile.bbox;
-              return new HexEdgeLayer(p, {data: null, image: null, pic: t.pic, col: t.col, bounds: [west, south, east, north]});
-            },
           });
           const ring = (h) => { try { return cellToBoundary(h, true); } catch (e) { return null; } };
           const outline = (id, h, color, width, m = map) => { const r = h ? ring(h) : null; return r ? new PathLayer({id, data: [r], getPath: (d) => d, getColor: color, widthUnits: "pixels", getWidth: width, beforeId: slot(m)}) : null; };
@@ -3051,10 +2837,7 @@ def _(anywidget, asyncio, time, traitlets):
             // while holding: the imagery, and over it only the two outlines
             //
             // kept in the stack while hidden (holding, zoomed out) so its shapes stay built
-            // the model's res 13 from OTF13_Z where it has run; the frame's hexagons otherwise
-            const res13 = MODEL_MODES.includes(st.gmode) && !!hmeta.otf && z >= OTF13_Z;
-            if (hexData && hcol) out.push(hexLayer(!st.holding && !res13 && z >= HEXZ));
-            if (hmeta.otf) out.push(otf13Layer(!st.holding && res13));
+            if (hexData && hcol) out.push(hexLayer(!st.holding && z >= HEXZ));
             const hv = hover != null && hover >= 0 ? outline("hover", hexes[hover], [255, 255, 255, 235], 2) : null;
             if (hv) out.push(hv);
             // gold on the dark basemap (was near-black on the light one)
@@ -3330,8 +3113,8 @@ def _(anywidget, asyncio, time, traitlets):
               const db = k === "ArrowLeft" ? -15 : k === "ArrowRight" ? 15 : 0, dp = k === "ArrowUp" ? 10 : k === "ArrowDown" ? -10 : 0;
               map.easeTo({bearing: map.getBearing() + db, pitch: Math.max(0, Math.min(map.getMaxPitch(), map.getPitch() + dp)), duration: e.repeat ? 120 : 250});
             }
-            // Color by: E Earthwork; R and Y only with the models on
-            else if (/^[eE]$/.test(k) || (cfg.models && /^[rRyY]$/.test(k))) { const w = {e: "earth", r: "struct", y: "first"}[k.toLowerCase()]; st.want = w; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); }
+            // Color by: E Earthwork
+            else if (/^[eE]$/.test(k)) { st.want = "earth"; const m = drawnMode(); if (m !== st.gmode) { st.gmode = m; recolorHex(); renderYear(); update(); } styleRows(); }
             // Q: the tooltip and picking off and back on
             else if (k === "q" || k === "Q") { st.noPick = !st.noPick; tip.style.display = "none"; hover = null; update(); note(st.noPick ? "No tooltip or picking (Q to turn them back on)" : "Tooltip and picking on", 2500); }
             // the kinds key's Built (W)
@@ -3551,7 +3334,7 @@ def _(
         "res_ladder": [ZOOM0, PER_RES, BASE_RES, MAX_RES],
         # true color read and drawn in the browser (deck.gl-raster); False: the kernel's PNG tiles
         "s2_gpu": True,
-        "models": list(EW_MODELS), "model": "current",
+        "ew_models": list(EW_MODELS), "model": "current",
     }))
     HOLD = {
         "frame": None, "sent": None, "box": None, "res": None, "vs": None,
