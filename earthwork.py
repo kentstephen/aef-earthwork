@@ -1699,7 +1699,8 @@ def _(anywidget, asyncio, time, traitlets):
            card on the right half under the buttons, each over the map it speaks for */
         .at-rcol{position:absolute;right:12px;top:60px;z-index:6;display:none;flex-direction:column;gap:8px;align-items:flex-end;max-width:calc(50% - 24px)}
         .at.pair .at-rcol{display:flex}
-        .at-rcol .at-yc,.at-top .at-yc{position:relative;right:auto;top:auto}
+        /* z-index auto: the search's place suggestions drop over the card */
+        .at-rcol .at-yc,.at-top .at-yc{position:relative;right:auto;top:auto;z-index:auto}
         .at-yc.at-s2c{display:none;transform-origin:top left}
         .at.pair .at-yc.at-s2c{display:block}
         .at-yc.gone{display:none}
