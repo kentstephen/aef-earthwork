@@ -1420,18 +1420,11 @@ def _(change_resolution, np, os, pa):
     # 50% to 4% lit, the Sahara from 51% to 2%
     GATE_LO, GATE_HI = 0.05, 0.15
 
-    # THE AREA SCALE (A on the map) reads the same score as log-odds, log(p / (1 - p)), clipped to LOGIT_LO..HI:
-    # in places unlike the US sites the model learned from (Bujumbura) every chance rounds to 0%, yet its
-    # log-odds still rank the ground; and unlike a plain log they keep the top apart too (zoomed out most
-    # hexagons carry a high peak, and a log puts everything from 50% to 100% within 0.7 of 0)
-    LOGIT_LO, LOGIT_HI = -30.0, 15.0
-
     def _earthwork(Vf, Vl, model="current", chunk=200_000):
         """The chance the ground moved, per row of Vf (first year) and Vl (last year), gated by how far AlphaEarth
-        moved, and its log-odds (clipped to LOGIT_LO..HI); NaN where either is missing. model: a key of EW_MODELS."""
+        moved; NaN where either is missing. model: a key of EW_MODELS."""
         EW_W, EW_B = EW_MODELS.get(model, EW_MODELS["current"])
         out = np.full(len(Vf), np.nan, np.float32)
-        logs = np.full(len(Vf), np.nan, np.float32)
         for i in range(0, len(Vf), chunk):
             f, l = Vf[i:i + chunk], Vl[i:i + chunk]
             ok = np.isfinite(f).all(1) & np.isfinite(l).all(1)
@@ -1440,13 +1433,7 @@ def _(change_resolution, np, os, pa):
             z = np.c_[b, a, a * b, (a - b) ** 2] @ EW_W + EW_B
             gate = np.clip(((1.0 - (a * b).sum(1)) - GATE_LO) / (GATE_HI - GATE_LO), 0, 1)
             out[i:i + chunk] = np.where(ok, gate / (1 + np.exp(-z)), np.nan)
-            # log p = log(gate) - log(1 + e^-z), without the overflow of exp(-z) far below the bar; log(1 - p)
-            # in float64 (p runs to within 1e-12 of 1)
-            with np.errstate(divide="ignore"):
-                lp = np.log(gate.astype(np.float64)) - np.logaddexp(0, -z.astype(np.float64))
-                lq = np.log1p(-np.minimum(np.exp(lp), 1 - 1e-12))
-            logs[i:i + chunk] = np.where(ok, np.clip(lp - lq, LOGIT_LO, LOGIT_HI), np.nan)
-        return out, logs
+        return out
 
     def build_frame(aef_by_year, y0, y1, res, model="current"):
         if aef_by_year.get(y0) is None or aef_by_year.get(y1) is None:
@@ -1467,24 +1454,21 @@ def _(change_resolution, np, os, pa):
         cellid = np.unique(par)
         n = len(cellid)
         hix = np.searchsorted(cellid, par)
-        earth_f, elog_f = _earthwork(aef_by_year[y0]["V"], Vl, model)
+        earth_f = _earthwork(aef_by_year[y0]["V"], Vl, model)
         earth = np.full(n, -1.0, np.float32)
-        elog = np.full(n, -np.inf, np.float32)
         okf = np.isfinite(earth_f)
         if n and okf.any():
             np.maximum.at(earth, hix[okf], earth_f[okf])
-            np.maximum.at(elog, hix[okf], elog_f[okf])
         earth = np.where(earth >= 0, earth, np.nan).astype(np.float32)
-        elog = np.where(np.isfinite(elog), elog, np.nan).astype(np.float32)
         nkids = np.bincount(hix, minlength=n).astype(np.int32)
         scored = np.isfinite(earth)
         cells = pa.table({"cell": pa.array(cellid), "earthwork": pa.array(earth), "finer_cells": pa.array(nkids)})
         return {
-            "cells": cells, "cellid": cellid, "res": res, "earth": earth, "elog": elog, "years": [y0, y1], "y0": y0, "y1": y1,
+            "cells": cells, "cellid": cellid, "res": res, "earth": earth, "years": [y0, y1], "y0": y0, "y1": y1,
             "score": f"Earthwork {y0} to {y1}: {int(scored.sum()):,} of {n:,} hexagons scored, peak of {nfine:,} finer cells",
         }
 
-    return EW_MODELS, LOGIT_HI, LOGIT_LO, build_frame
+    return EW_MODELS, build_frame
 
 
 @app.cell
@@ -1650,14 +1634,6 @@ def _(anywidget, asyncio, time, traitlets):
         .at-key{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;font-size:12.5px;color:var(--muted);flex:1 1 auto;min-width:0}
         .at-key .why{flex-basis:100%;white-space:normal;font-size:11.5px;line-height:1.35}
         .at-ramp{height:10px;border-radius:3px;width:150px}
-        /* the area scale's floor (A): one thumb on the Years read slider's track, the ramp's inked part to its right */
-        .at-afl-hd{flex-basis:100%}
-        .at-afl-lo{min-width:52px}
-        .at-afl{flex-basis:100%;display:flex;align-items:center;gap:10px;margin:2px 0 1px}
-        .at-afl-win{width:190px}
-        .at-afl-win input{pointer-events:auto}
-        .at-afl-win input:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 2px var(--cool)}
-        .at-afl-win .tks i.on{color:var(--text);font-weight:600}
         .at-win{position:relative;width:170px;height:28px;flex:0 0 auto}
         .at-win input{position:absolute;left:0;top:0;width:100%;height:22px;margin:0;background:none;pointer-events:none;-webkit-appearance:none;appearance:none}
         .at-win input:focus{outline:none}
@@ -1859,7 +1835,7 @@ def _(anywidget, asyncio, time, traitlets):
           const A_FILL = cfg.alpha_fill || 235, A_QUIET = cfg.alpha_quiet || 70, A_DIM = 45;
           const HEXZ = cfg.hex_zoom || 9, HOLD_MS = cfg.hold_ms || 200, SLOP = cfg.hold_slop || 5;
           const st = {
-            gmode: "earth", want: "earth", area: false, areaFloor: 0, noPick: false, hideKinds: new Set(), focus: "all", y0: cfg.aef_from || 2022, y1: cfg.aef_to || 2025,
+            gmode: "earth", want: "earth", noPick: false, hideKinds: new Set(), focus: "all", y0: cfg.aef_from || 2022, y1: cfg.aef_to || 2025,
             imgYear: cfg.s2_year || S2Y[S2Y.length - 1], labels: true, s2scale: Number(cfg.s2_scale) || 1, s2comp: cfg.s2_comp || "tci",
             fit: !!cfg.fit, holding: false,
             // the pair (P) and its left side (Sentinel-2)
@@ -2032,31 +2008,6 @@ def _(anywidget, asyncio, time, traitlets):
               keyEl.querySelectorAll("[data-kind]").forEach((b) => { b.onclick = (e) => { e.stopPropagation(); const k = +b.dataset.kind; st.hideKinds.has(k) ? st.hideKinds.delete(k) : st.hideKinds.add(k); recolorHex(); renderYear(); styleKey(); update(); }; });
               return;
             }
-            if (st.gmode === "earth" && st.area && areaSt) {
-              const top = Math.round(100 * areaSt.topGlobal);
-              const k0 = st.areaFloor || 0, fl = AREA_FLOORS[k0], nF = AREA_FLOORS.length - 1;
-              const phrase = (f) => (f[1] === "middle" ? "middle" : f[1] + " (below it, quiet ground)");
-              keyEl.innerHTML = `<span class="at-afl-hd">Unusual for this area, ${y0} to ${y1}</span><span class="at-afl-lo">${fl[1]}</span> <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> most unusual`
-                + `<span class="at-afl"><span>Color from</span><span class="at-win at-afl-win"><span class="trk"></span><span class="spn"></span>`
-                + `<span class="tks">${AREA_FLOORS.map((f, k) => `<span><i class="${k === k0 ? "on" : ""}">${f[2]}</i></span>`).join("")}</span>`
-                + `<input type="range" min="0" max="${nF}" step="1" value="${k0}" aria-label="where the color starts"></span></span>`
-                + `<span class="why">Each hexagon against the rest of this area (A again for the normal scale): the color starts at the area's <span class="at-afl-ph">${phrase(fl)}</span>, full ink at its top tenth of a percent. Every area has a top, even where nothing was dug: a higher start keeps only its most unusual ground. On the normal scale this area's top reaches <b>${top}%</b>${top < 5 ? ", so even its most unusual ground is quiet" : ""}.</span>`;
-              // the inked part of the ramp: from the thumb to the right end
-              const spn = keyEl.querySelector(".at-afl-win .spn");
-              const place = (k) => { spn.style.left = `calc(8px + (100% - 16px) * ${k / nF})`; spn.style.right = "8px"; };
-              place(k0);
-              const rng = keyEl.querySelector(".at-afl input");
-              rng.oninput = (e) => {
-                e.stopPropagation();
-                const k = Number(rng.value), f = AREA_FLOORS[k];
-                st.areaFloor = k; recolorHex(); update(); place(k);
-                keyEl.querySelectorAll(".at-afl-win .tks i").forEach((t, j) => t.classList.toggle("on", j === k));
-                keyEl.querySelector(".at-afl-lo").textContent = f[1];
-                keyEl.querySelector(".at-afl-ph").textContent = phrase(f);
-              };
-              rng.onclick = rng.onpointerdown = (e) => e.stopPropagation();
-              return;
-            }
             if (st.gmode === "earth") { keyEl.innerHTML = `Ground moved, ${y0} to ${y1}: unlikely <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> likely<span class="why">The chance the ground itself was dug, filled or graded, from AlphaEarth's ${y0} and ${y1} by a model taught on 3DEP repeat lidar. Each hexagon shows its highest-scoring patch.</span>`; return; }
             keyEl.innerHTML = `Built ground (built-up, road or construction in ${y1}): barely <i class="at-ramp" style="background:linear-gradient(90deg,${virCss(8)})"></i> a lot, ${y0} to ${y1}`;
           }
@@ -2121,7 +2072,7 @@ def _(anywidget, asyncio, time, traitlets):
             <p><b>Earthwork</b> (E) is the chance the ground itself was dug, filled or graded between the first and last year read: a model on AlphaEarth taught where 3DEP lidar flew the same ground twice. Each hexagon shows its highest-scoring finer cell, so a single dig stands out. Pair (P) with Sentinel-2 to see what it is.</p>
             <p>Earthwork is drawn in H3 hexagons from zoom ${HEXZ}. <b>Click</b> a hexagon for its account.</p>
             <p><b>Hold space</b> to see the Sentinel-2 yearly imagery (Earth Genome, 2022 to 2025) instead of the hexagons; scroll while holding to step through the years.</p>
-            <p><small>Keys: hold space for the imagery, scroll or [ and ] for its year, B its first year or its latest; P pairs the map with Sentinel-2; A the area scale (unusual for this area) and back; Q the tooltip and picking off and on; Shift + arrows turn and tilt the map; F full screen; ; and ' its brightness; - = and _ + the years read; L place names; / search (a place, or paste an H3 string); X fill the window; Esc close.</small></p>
+            <p><small>Keys: hold space for the imagery, scroll or [ and ] for its year, B its first year or its latest; P pairs the map with Sentinel-2; M swaps the model (Current, Ex-US); Q the tooltip and picking off and on; Shift + arrows turn and tilt the map; F full screen; ; and ' its brightness; - = and _ + the years read; L place names; / search (a place, or paste an H3 string); X fill the window; Esc close.</small></p>
             <p><small>AlphaEarth Foundations by Google and Google DeepMind (CC BY 4.0). ESA WorldCover 10 m 2021 v200, contains modified Copernicus Sentinel data processed by the ESA WorldCover consortium (CC BY 4.0). Impact Observatory, Microsoft and Esri 10 m annual land use and land cover v02, via Microsoft Planetary Computer (CC BY 4.0). Overture Maps transportation and land use, &copy;&nbsp;OpenStreetMap contributors (ODbL), from Overture's PMTiles. Sentinel-2 mosaics by Earth Genome (CC BY 4.0). Place names from Overture Maps divisions, &copy;&nbsp;OpenStreetMap contributors, Overture Maps Foundation (ODbL), with geoBoundaries, Esri Community Maps contributors and LINZ (CC BY 4.0): the PMTiles and, via Source Cooperative, fused/overture. Search by Photon over OpenStreetMap (ODbL). Basemap by Carto.</small></p>
             <div style="margin-top:12px"><button class="at-chip">Close</button></div></div>`;
           pane.appendChild(about);
@@ -2180,35 +2131,11 @@ def _(anywidget, asyncio, time, traitlets):
           const pngBitmap = (u8) => createImageBitmap(new Blob([u8], {type: "image/png"}));
 
           // ---- the hexagons -----------------------------------------------------------
-          let areaSt = null;  // the area scale's numbers for the frame (areaStats)
           let hexes = [], N = 0, res = -1, hexIndex = new Map(), hattrs = null, hmeta = {}, hcol = null, hcol32 = null, hexSeq = 0, hover = null, picked = null, imgPick = null;
-          // THE AREA SCALE (A): each hexagon's Earthwork log-odds (3rd byte, -30..15 as 1..255) against the rest of
-          // the frame's hexagons, stretched from the floor (no ink) to their top 0.1% (full ink); in log-odds
-          // so places the model scores ~0% everywhere still rank, and the top stays apart. topGlobal: the normal scale's value at that top.
-          // THE FLOOR is a stepped slider in the key: the frame's median by default, or its top 25, 10, 5 or 1%. A
-          // frame where nothing was dug still has a top, so its ramp paints noise; a higher floor keeps only the
-          // frame's most unusual ground, with the whole ramp spread over it (at the lidar sites the top fifth of
-          // the ramp is mostly real digging, its middle mostly not)
-          const AREA_FLOORS = [[0.5, "middle", "Middle"], [0.75, "top 25%", "25%"], [0.9, "top 10%", "10%"], [0.95, "top 5%", "5%"], [0.99, "top 1%", "1%"]];
-          function areaStats() {
-            const hl = new Uint32Array(256), he = new Uint32Array(256);
-            let n = 0;
-            for (let i = 0; i < N; i++) { const v = hattrs[HB * i + 2]; if (v) { hl[v]++; he[hattrs[HB * i + 16]]++; n++; } }
-            if (n < 20) return null;
-            const at = (h, q) => { let c = 0; for (let v = 1; v < 256; v++) { c += h[v]; if (c >= q * n) return v; } return 255; };
-            const cdf = new Float32Array(256);
-            for (let v = 1, c = 0; v < 256; v++) { c += hl[v]; cdf[v] = c / n; }
-            const top = at(hl, 0.999), lo = Math.min(at(hl, AREA_FLOORS[st.areaFloor || 0][0]), top - 1);
-            return {lo, top, cdf, n, topGlobal: (at(he, 0.999) - 1) / 254};
-          }
-          const areaT = (v) => (v ? Math.max(0, Math.min(1, (v - areaSt.lo) / (areaSt.top - areaSt.lo))) : 0);
-          // "top 2% of this area" for the hover and the card
-          const areaWords = (i) => { if (!(st.area && areaSt)) return ""; const v = hattrs[HB * i + 2]; if (!v) return ""; const p = 100 * (1 - areaSt.cdf[v - 1]); return `; ${p < 1 ? "top " + (p < 0.1 ? "0.1" : p.toFixed(1)) + "%" : p <= 50 ? "top " + Math.round(p) + "%" : "lower half"} of this area`; };
           function recolorHex() {
             if (!N || !hattrs || hattrs.length !== HB * N) { hcol = null; hcol32 = null; return; }
             hcol = new Uint8Array(4 * N);
             hcol32 = new Uint32Array(hcol.buffer);
-            areaSt = st.gmode === "earth" ? areaStats() : null;
             for (let i = 0; i < N; i++) {
               const a8 = HB * i, o = 4 * i, lv = hattrs[a8 + 1];
               let col, a;
@@ -2216,7 +2143,7 @@ def _(anywidget, asyncio, time, traitlets):
                 // the chance the ground moved, on all ground: quiet ground faint, likely earthwork in full ink
                 const v = hattrs[a8 + 16];
                 if (!v) continue;
-                const t = st.area && areaSt ? areaT(hattrs[a8 + 2]) : (v - 1) / 254;
+                const t = (v - 1) / 254;
                 col = vir(t); a = Math.round(A_QUIET + (A_FILL - A_QUIET) * t);
               } else if (st.gmode === "kinds") {
                 // its kind's color, fuller the more it moved; quiet ground faint gray
@@ -2248,7 +2175,7 @@ def _(anywidget, asyncio, time, traitlets):
             if (!lv) return "No AlphaEarth data here.";
             if (st.gmode === "earth") {
               const v = hattrs[o + 16];
-              return v ? `<b>Earthwork ${Math.round(100 * (v - 1) / 254)}%</b>${areaWords(i)}: the chance the ground itself was dug, filled or graded, ${hmeta.y0 || st.y0} to ${hmeta.y1 || st.y1}` : "No AlphaEarth data here.";
+              return v ? `<b>Earthwork ${Math.round(100 * (v - 1) / 254)}%</b>: the chance the ground itself was dug, filled or graded, ${hmeta.y0 || st.y0} to ${hmeta.y1 || st.y1}` : "No AlphaEarth data here.";
             }
             let s;
             if (st.gmode === "kinds") {
@@ -2344,7 +2271,7 @@ def _(anywidget, asyncio, time, traitlets):
             else if (mode === "earth") {
               const i = c.cell ? hexIndex.get(c.cell) : null, v = i != null && hattrs ? hattrs[HB * i + 16] : 0;
               h += `<h4>Earthwork</h4>`;
-              h += v ? `<p><b>${Math.round(100 * (v - 1) / 254)}%</b>${i != null ? areaWords(i) : ""}: the chance the ground itself was dug, filled or graded from ${c.y0} to ${c.y1} (its highest-scoring patch).</p>` : `<p>No score here.</p>`;
+              h += v ? `<p><b>${Math.round(100 * (v - 1) / 254)}%</b>: the chance the ground itself was dug, filled or graded from ${c.y0} to ${c.y1} (its highest-scoring patch).</p>` : `<p>No score here.</p>`;
               h += `<p class="sub">Pair with Sentinel-2 (<kbd>P</kbd>) or hold space to see what it is.</p>`;
             } else {
               h += `<h4>AEF Change</h4>`;
@@ -3120,8 +3047,6 @@ def _(anywidget, asyncio, time, traitlets):
             // the kinds key's Built (W)
             else if (k === "w" || k === "W") { if (st.gmode !== "kinds") return; st.focus = "built"; recolorHex(); styleKey(); update(); }
             else if (k === "p" || k === "P") setPair(!st.pair);
-            // A: the area scale and back (Earthwork only)
-            else if (k === "a" || k === "A") { if (st.gmode !== "earth") return; st.area = !st.area; recolorHex(); styleKey(); update(); note(st.area ? "Area scale: unusual for this area (A for the normal scale)" : "Normal scale", 2500); }
             else if (k === "[" || k === "]") stepImg(k === "]" ? 1 : -1);
             // B: the imagery's first year and its latest, back and forth (from any other year, the
             // latest), while it shows: holding space, or on the pair's left side
@@ -3171,7 +3096,7 @@ def _(anywidget, asyncio, time, traitlets):
             map = new maplibregl.Map({container: mapEl, style: STYLE, center: [home.longitude, home.latitude], zoom: home.zoom, attributionControl: {compact: true}});
             map.keyboard.disable();
             map.doubleClickZoom.enable();
-            root._otf = {map, st, cfg: () => cfg, hmeta: () => hmeta, area: () => areaSt, hexShown: () => (hexData && hcol ? hmeta.seq : 0), tiles: () => tlog, s2: () => ({...s2Stat, warm: s2Warm, sources: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.ids.size])), batches: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.batches.length]))})};  // for headless tests
+            root._otf = {map, st, cfg: () => cfg, hmeta: () => hmeta, hexShown: () => (hexData && hcol ? hmeta.seq : 0), tiles: () => tlog, s2: () => ({...s2Stat, warm: s2Warm, sources: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.ids.size])), batches: Object.fromEntries([...s2Src].map(([y, e]) => [y, e.batches.length]))})};  // for headless tests
             map.addControl(new maplibregl.NavigationControl({showCompass: false}), "bottom-left");
             ov = new MapboxOverlay({interleaved: true, layers: [], onError: (e) => say("deck: " + (e && e.message ? e.message : e))});
             map.addControl(ov);
@@ -3353,8 +3278,6 @@ def _(
     CARRY_RES,
     EW_MODELS,
     CELL_KM2,
-    LOGIT_HI,
-    LOGIT_LO,
     HEX_UP,
     HEX_ZOOM,
     HOLD,
@@ -3438,18 +3361,16 @@ def _(
 
     # ---- the hexagons -------------------------------------------------------------
     def _paint():
-        """Send the frame once: 17 bytes per hexagon, the layout the browser reads. Only three are used
-        here: the 2nd (AlphaEarth here: nonzero), the 3rd (Earthwork's log-odds for the area scale, LOGIT_LO..HI
-        as 1..255, 0 none) and the 17th (Earthwork 1..255, 0 none); the 9th is 1 (drawn). Colored in the
+        """Send the frame once: 17 bytes per hexagon, the layout the browser reads. Only two are used
+        here: the 2nd (AlphaEarth here: nonzero) and the 17th (Earthwork 1..255, 0 none); the 9th is 1 (drawn). Colored in the
         browser."""
         fr = HOLD["frame"]
         if fr is None or HOLD["sent"] is fr:
             return
-        ew, el = fr["earth"], fr["elog"]
+        ew = fr["earth"]
         eb = np.where(np.isnan(ew), 0, 1 + np.round(254 * np.nan_to_num(ew))).astype(np.uint8)
-        lb = np.where(np.isnan(el), 0, 1 + np.round(254 * np.clip((np.nan_to_num(el) - LOGIT_LO) / (LOGIT_HI - LOGIT_LO), 0, 1))).astype(np.uint8)
         at = np.zeros((len(ew), 17), np.uint8)
-        at[:, 1], at[:, 2], at[:, 8], at[:, 16] = eb, lb, 1, eb
+        at[:, 1], at[:, 8], at[:, 16] = eb, 1, eb
         with cmap.hold_sync():
             cmap.cells = fr["cellid"].astype("<u8").tobytes()
             cmap.hattrs = at.tobytes()
