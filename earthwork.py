@@ -1406,8 +1406,7 @@ def _(change_resolution, np, os, pa):
         with _ur.urlopen("https://raw.githubusercontent.com/kentstephen/aef-earthwork/main/models/earthwork-lr.npz", timeout=60) as _r:
             _ew = np.load(_io.BytesIO(_r.read()))
     # the two models the card offers (M switches them): "current" (earthwork-lr.npz), taught on US lidar only, and
-    # "abroad" (earthwork-lr-abroad.npz), taught with truth from outside the 48 states too. The other files in
-    # models/ are experiments kept for the record, not offered on the map
+    # "abroad" (earthwork-lr-abroad.npz), taught with truth from outside the 48 states too
     EW_MODELS = {"current": (_ew["w"].astype(np.float32), float(_ew["b"]))}
     _abp = os.path.join(_ewd, "earthwork-lr-abroad.npz")
     if os.path.exists(_abp):

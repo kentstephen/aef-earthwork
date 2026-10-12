@@ -30,3 +30,9 @@ layouts/
 exports/
 .vscode/
 .idea/
+
+# Public repo holds only earthwork.py, the scripts that train its models, and the two models it offers
+aef-boundaries.py
+models/*
+!models/earthwork-lr.npz
+!models/earthwork-lr-abroad.npz
