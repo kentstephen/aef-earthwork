@@ -2,6 +2,8 @@
 
 - `earthwork.py`: where the ground was dug, filled or graded, from AlphaEarth, by a model taught
   where 3DEP lidar flew the same ground twice. A for the area scale (unusual for this area).
+  It opens reading 2023 to 2025. Widening Years read (back as far as 2017) means more years of
+  embeddings to fetch for every view, so the map loads more slowly.
   [![Open in molab](https://molab.marimo.io/molab-shield.svg)](https://molab.marimo.io/github/github.com/kentstephen/aef-earthwork/blob/main/earthwork.py)
 
 AlphaEarth Foundations (AEF) annual embeddings draped over elevation, to see how river

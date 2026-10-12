@@ -32,7 +32,9 @@ exports/
 .idea/
 
 # Public repo holds only earthwork.py, the scripts that train its models, and the two models it offers
-aef-boundaries.py
+/*.py
+!/earthwork.py
+!/earthwork_*.py
 models/*
 !models/earthwork-lr.npz
 !models/earthwork-lr-abroad.npz
